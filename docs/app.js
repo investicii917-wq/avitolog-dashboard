@@ -2,7 +2,7 @@
 import {readState,saveState,AUTH_KEY} from './data.js';
 import {uid,todayKey,normalItem,receiveEvent,addSlot,addBooking,freeTimes,dayLoad,minutes} from './model.js';
 const root=document.getElementById('app');
-let state,unlocked=false,draft=null,galleryIndex=0,toastTimer,commitQueue=Promise.resolve();
+let state,unlocked=false,draft=null,galleryIndex=0,toastTimer,photoBusy=false,commitQueue=Promise.resolve();
 const icons={
  back:'<path d="m15 5-7 7 7 7"/>',close:'<path d="m6 6 12 12M18 6 6 18"/>',
  plus:'<path d="M12 5v14M5 12h14"/>',calendar:'<rect x="3" y="5" width="18" height="16" rx="3"/><path d="M7 3v4m10-4v4M3 10h18m-13 5h.01M12 15h.01M17 15h.01"/>',
@@ -26,7 +26,7 @@ function go(path){if(location.hash==='#'+path)render();else location.hash=path;}
 function toast(message){clearTimeout(toastTimer);const el=document.getElementById('notifications');el.innerHTML='<div class="toast">'+esc(message)+'</div>';toastTimer=setTimeout(()=>el.innerHTML='',4200);}
 async function commit(transform){const job=commitQueue.then(async()=>{const next=await transform(structuredClone(state));await saveState(next);state=next;return state;});commitQueue=job.catch(()=>{});return job;}
 const btn=(label,action,cls='')=>'<button type="button" class="btn '+cls+'" data-action="'+action+'">'+label+'</button>';
-const link=(label,href,cls='')=>'<a class="'+cls+'" href="#'+esc(href)+'">'+label+'</a>';
+const link=(label,href,cls='')=>'<a class="'+cls+'" '+(label===icon('back')?'aria-label="Назад" ':label===icon('close')?'aria-label="Закрыть" ':label===icon('next')?'aria-label="Вперёд" ':'')+'href="#'+esc(href)+'">'+label+'</a>';
 const section=(body,cls='')=>'<section class="section '+cls+'">'+body+'</section>';
 function page(title,back,body,dock='',close=false){return '<header class="page-head"><div class="page-head-inner">'+(!close?link(icon('back'),back,'icon-button'):'')+'<h1>'+esc(title)+'</h1>'+(close?link(icon('close'),back,'icon-button'):'')+'</div></header><main class="page-content '+(dock?'has-dock':'')+'">'+body+'</main>'+dockHtml(dock);}
 function dockHtml(body){return body?'<footer class="dock"><div class="dock-inner">'+body+'</div></footer>':'';}
@@ -125,6 +125,7 @@ function loginPage(){
 }
 function inlineError(message){const el=document.getElementById('form-error');if(el)el.innerHTML='<p class="inline-error">'+esc(message)+'</p>';else toast(message);}
 async function saveItem(form){
+ if(photoBusy)throw Error('Дождитесь загрузки фотографий');
  const f=new FormData(form),isNew=draft.key==='new';
  const raw=String(f.get('raw')||'').trim();
  const data={...(isNew?{}:item(draft.id)),id:isNew?uid():draft.id,status:isNew?'queue':draft.status,title:isNew?(raw.split(/[\n.!?]/)[0]||'Новое объявление').slice(0,50):String(f.get('title')||'').trim(),raw,description:isNew?'':String(f.get('description')||''),photos:draft.photos,price:f.get('price')===''?null:Number(f.get('price')),pickupMinutes:isNew?60:Number(f.get('pickupMinutes')),delivery:!isNew&&f.has('delivery')};
@@ -190,19 +191,29 @@ root.addEventListener('click',async e=>{
 });
 function refreshPhotos(){const el=document.getElementById('photo-editor');if(el)el.innerHTML=photosHtml(draft);}
 function fileData(file){return new Promise((resolve,reject)=>{const r=new FileReader();r.onload=()=>resolve(r.result);r.onerror=()=>reject(Error('Не удалось прочитать фото '+file.name));r.readAsDataURL(file);});}
-root.addEventListener('change',async e=>{
- const input=e.target;
- if(input.id==='booking-slot'){const r=route();go('/item/'+r.parts[1]+'/book/'+r.parts[3]+'?slot='+input.value);return;}
- if(input.id!=='photo-files')return;
- const targetDraft=draft;
+
+async function ingestPhotos(files,input){
+ const targetDraft=draft;if(!targetDraft)return;
  try{
- const files=Array.from(input.files||[]);if(targetDraft.photos.length+files.length>10)throw Error('Максимум 10 фотографий. Свободно мест: '+(10-targetDraft.photos.length));
+ if(photoBusy)throw Error('Фотографии ещё загружаются');
+ if(targetDraft.photos.length+files.length>10)throw Error('Максимум 10 фотографий. Свободно мест: '+(10-targetDraft.photos.length));
  if(files.some(f=>!f.type.startsWith('image/')))throw Error('Выберите файлы фотографий');
  if(files.some(f=>f.size>20*1024*1024))throw Error('Одна фотография должна быть не больше 20 МБ');
+ photoBusy=true;
  const saved=await Promise.all(files.map(async f=>({id:uid(),name:f.name,type:f.type,src:await fileData(f)})));
  if(draft!==targetDraft)return;
  targetDraft.photos.push(...saved);refreshPhotos();toast('Добавлено фото: '+files.length);
- }catch(err){toast(err.message);input.value='';}
+ }catch(err){toast(err.message);if(input)input.value='';}finally{photoBusy=false;}
+}
+root.addEventListener('change',async e=>{
+ const input=e.target;
+ if(input.id==='booking-slot'){const r=route();go('/item/'+r.parts[1]+'/book/'+r.parts[3]+'?slot='+input.value);return;}
+ if(input.id==='photo-files')await ingestPhotos(Array.from(input.files||[]),input);
+});
+root.addEventListener('paste',async e=>{
+ if(!draft)return;
+ const files=Array.from(e.clipboardData?.files||[]).filter(f=>f.type.startsWith('image/'));
+ if(files.length){e.preventDefault();await ingestPhotos(files);}
 });
 window.addEventListener('hashchange',()=>{window.scrollTo(0,0);render();});
 window.avitologBridge=Object.freeze({
