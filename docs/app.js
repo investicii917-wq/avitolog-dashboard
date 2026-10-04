@@ -1,6 +1,6 @@
 
-import {readState,saveState,AUTH_KEY} from './data.js';
-import {uid,todayKey,normalItem,receiveEvent,addSlot,addBooking,freeTimes,dayLoad,minutes} from './model.js';
+import {readState,saveState,AUTH_KEY} from './data.js?v=4';
+import {uid,todayKey,normalItem,receiveEvent,addSlot,addBooking,freeTimes,dayLoad,minutes} from './model.js?v=4';
 const root=document.getElementById('app');
 let state,unlocked=false,draft=null,galleryIndex=0,toastTimer,photoBusy=false,commitQueue=Promise.resolve();
 const icons={
@@ -15,6 +15,7 @@ const icons={
 };
 const icon=name=>'<svg viewBox="0 0 24 24" aria-hidden="true">'+(icons[name]||icons.box)+'</svg>';
 const esc=x=>String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const plural=(n,one,few,many)=>n+' '+(n%100>=11&&n%100<=14?many:n%10===1?one:n%10>=2&&n%10<=4?few:many);
 const money=n=>n==null?'Цена не указана':new Intl.NumberFormat('ru-RU').format(n)+' ₽';
 const statusName={queue:'Ожидает обработки',ready:'Готово к публикации',published:'Опубликовано',sold:'Продано'};
 const item=id=>state.items.find(x=>x.id===id);
@@ -70,7 +71,7 @@ function editPage(id){
 }
 function commentsPage(x){return page('Комментарий для ИИ','/item/'+x.id,section('<h2>'+esc(x.title)+'</h2><p>Укажите, что нужно изменить, уточнить или учесть при обработке.</p><form id="comment-form">'+field('Комментарий','<textarea name="text" rows="6" required placeholder="Например: учесть царапины на корпусе и самовывоз вдвоём…"></textarea>')+'</form>')+section('<h2>Комментарии</h2>'+(x.comments.length?x.comments.slice().reverse().map(c=>'<div class="comment">'+esc(c.text)+'<small>'+stamp(c.createdAt)+' · Сохранён для обработки</small></div>').join(''):'<p>Комментариев пока нет.</p>')),'<button class="btn primary" form="comment-form" type="submit">Сохранить комментарий</button>');}
 function offersPage(x){
- return page('Предложения','/item/'+x.id,section('<h2>'+esc(x.title)+'</h2><p>'+x.offers.length+' предложений · цена '+money(x.price)+'</p>')+
+ return page('Предложения','/item/'+x.id,section('<h2>'+esc(x.title)+'</h2><p>'+plural(x.offers.length,'предложение','предложения','предложений')+' · цена '+money(x.price)+'</p>')+
  (x.offers.length?x.offers.map(o=>section('<div class="offer-top"><div><h2>'+esc(o.buyer)+'</h2><div class="offer-sub">'+stamp(o.createdAt)+'</div></div><span class="tag">'+({pending:'Новое',accepted:'Принято',rejected:'Отклонено'})[o.status]+'</span></div><div class="offer-price">'+money(o.price)+'</div><div class="offer-sub">'+(x.price?Math.round((o.price/x.price-1)*100)+'% от вашей цены':'Цена покупателя')+'</div><div class="offer-facts"><div><span>Получение</span>'+(o.method==='delivery'?'Просит доставку':'Самовывоз')+'</div><div><span>Готов получить</span>'+(o.preferredDate?shortDate(o.preferredDate):'Не уточнено')+' '+esc(o.preferredTime||'')+'</div><div><span>Сообщений</span>'+o.messageCount+'</div></div><p>'+esc(o.note||'Без комментария')+'</p>'+(o.status==='pending'?'<div class="divider"></div>'+link('Принять и назначить время','/item/'+x.id+'/book/'+o.id,'btn accent block'):''))).join(''):section('<p>Здесь появятся предложения покупателей: цена, способ получения и удобное время.</p>')));
 }
 function calendarPage(params){
