@@ -27,7 +27,7 @@ const route=()=>{const [path,query='']=(location.hash.slice(1)||'/analytics').sp
 function go(path){if(location.hash==='#'+path)render();else location.hash=path;}
 function toast(message){clearTimeout(toastTimer);const el=document.getElementById('notifications');el.innerHTML='<div class="toast">'+esc(message)+'</div>';toastTimer=setTimeout(()=>el.innerHTML='',4200);}
 async function commit(transform){const job=commitQueue.then(async()=>{const next=await transform(structuredClone(state));await saveState(next);state=next;queueBridgeSync();return state;});commitQueue=job.catch(()=>{});return job;}
-function queueBridgeSync(){clearTimeout(bridgeSyncTimer);bridgeSyncTimer=setTimeout(()=>{syncBridge();},0);}
+function queueBridgeSync(delay=0){clearTimeout(bridgeSyncTimer);bridgeSyncTimer=setTimeout(()=>{syncBridge();},delay);}
 async function syncBridge(){
  if(bridgeSyncing||!state||!bridgeConnection?.bridgeUrl||!bridgeConnection?.accessKey)return;
  if(!/^https?:\/\//i.test(bridgeConnection.bridgeUrl))return;
@@ -35,11 +35,11 @@ async function syncBridge(){
  try{
   for(const task of state.outbox.filter(x=>!x.deliveredAt)){
    let response;
-   try{response=await fetch(bridgeConnection.bridgeUrl+'/api/v1/events',{method:'POST',headers:{'Content-Type':'application/json','X-Avitolog-Key':bridgeConnection.accessKey},body:JSON.stringify({event:{id:task.id,type:task.type,payload:task.payload,createdAt:task.createdAt}})});}catch{return;}
-   if(!response.ok)return;
+   try{response=await fetch(bridgeConnection.bridgeUrl+'/api/v1/events',{method:'POST',headers:{'Content-Type':'application/json','X-Avitolog-Key':bridgeConnection.accessKey},body:JSON.stringify({event:{id:task.id,type:task.type,payload:task.payload,createdAt:task.createdAt}})});}catch{queueBridgeSync(5000);return;}
+   if(!response.ok){queueBridgeSync(5000);return;}
    await commit(s=>{const saved=s.outbox.find(x=>x.id===task.id);if(saved)saved.deliveredAt=new Date().toISOString();return s;});
   }
- }finally{bridgeSyncing=false;}
+ }finally{bridgeSyncing=false;if(state?.outbox.some(x=>!x.deliveredAt))queueBridgeSync(5000);}
 }
 const btn=(label,action,cls='')=>'<button type="button" class="btn '+cls+'" data-action="'+action+'">'+label+'</button>';
 const link=(label,href,cls='')=>'<a class="'+cls+'" '+(label===icon('back')?'aria-label="Назад" ':label===icon('close')?'aria-label="Закрыть" ':label===icon('next')?'aria-label="Вперёд" ':'')+'href="#'+esc(href)+'">'+label+'</a>';
