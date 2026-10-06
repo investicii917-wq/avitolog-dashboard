@@ -1,6 +1,6 @@
 
-import {readState,saveState,AUTH_KEY} from './data.js?v=4';
-import {uid,todayKey,normalItem,receiveEvent,addSlot,addBooking,freeTimes,dayLoad,minutes} from './model.js?v=4';
+import {readState,saveState,AUTH_KEY} from './data.js?v=5';
+import {uid,todayKey,normalItem,receiveEvent,addSlot,addBooking,freeTimes,dayLoad,minutes} from './model.js?v=5';
 const root=document.getElementById('app');
 let state,unlocked=false,draft=null,galleryIndex=0,toastTimer,photoBusy=false,commitQueue=Promise.resolve();
 const icons={
@@ -55,19 +55,28 @@ function detailPage(x){
 }
 function getDraft(id){
  const key=id||'new';
- if(!draft||draft.key!==key)draft={key,...(id?structuredClone(item(id)):{photos:[],title:'',raw:'',description:'',price:null,pickupMinutes:60,delivery:false})};
+ if(!draft||draft.key!==key)draft={key,...(id?structuredClone(item(id)):{photos:[],title:'',raw:'',description:'',price:null,pickupMinutes:60,delivery:false,productKind:'single',condition:'used',size:'',defects:'',quantity:1,generateCards:false,cardStyle:'realistic'})};
  return draft;
+}
+function productFields(d){
+ const kind=d.productKind==='batch'?'batch':'single',condition=d.condition==='new'?'new':'used';
+ return '<section class="section product-section"><h2>Параметры товара</h2><div class="segmented" role="radiogroup" aria-label="Тип товара"><label><input type="radio" name="productKind" value="single" '+(kind==='single'?'checked':'')+'><span>Товар 1</span></label><label><input type="radio" name="productKind" value="batch" '+(kind==='batch'?'checked':'')+'><span>Товар тиражный</span></label></div><div class="product-single '+(kind==='single'?'':'is-hidden')+'"><div class="field-label">Состояние</div><div class="segmented condition" role="radiogroup" aria-label="Состояние"><label><input type="radio" name="condition" value="used" '+(condition==='used'?'checked':'')+'><span>Б/у</span></label><label><input type="radio" name="condition" value="new" '+(condition==='new'?'checked':'')+'><span>Новое</span></label></div></div><div class="product-batch '+(kind==='batch'?'':'is-hidden')+'">'+field('Количество штук','<input name="quantity" type="number" min="1" step="1" inputmode="numeric" value="'+(Number(d.quantity)||1)+'">','Укажите, сколько одинаковых единиц есть в наличии.')+'</div>'+field('Размеры','<input name="size" maxlength="120" value="'+esc(d.size||'')+'" placeholder="Например: 120 × 60 × 80 см">')+field('Дефекты и нюансы','<textarea name="defects" rows="3" placeholder="Если есть — опишите честно. Это попадёт в обработку объявления.">'+esc(d.defects||'')+'</textarea>')+'</section>';
+}
+function cardsHtml(d){
+ const enabled=!!d.generateCards,style=d.cardStyle==='studio'?'studio':'realistic';
+ const previews=d.photos.length?'<div class="card-preview-grid">'+d.photos.map((p,i)=>'<div class="source-cards"><div class="source-card-label">Фото '+(i+1)+'</div><div class="empty-card '+(style==='realistic'?'selected':'')+'"><span>Реалистичная</span><small>Будет создана позже</small></div><div class="empty-card '+(style==='studio'?'selected':'')+'"><span>Студийная</span><small>Будет создана позже</small></div></div>').join('')+'</div>':'<div class="cards-empty">Добавьте фотографии — для каждой появятся две будущие карточки.</div>';
+ return '<section class="section cards-section"><label class="switch-row card-switch"><span><b>Создать карточки</b><small>Подготовить задачу для генерации вариантов</small></span><input type="checkbox" name="generateCards" data-action="cards-toggle" '+(enabled?'checked':'')+'></label><div id="cards-config" class="cards-config '+(enabled?'':'is-hidden')+'"><div class="divider"></div><h2>Вариант карточек</h2><div class="card-style-options"><label class="card-style-option"><input type="radio" name="cardStyle" value="realistic" '+(style==='realistic'?'checked':'')+'><span><b>Реалистичные</b><small>Предмет в чистой домашней обстановке. Оригинальный товар сохраняется.</small></span></label><label class="card-style-option"><input type="radio" name="cardStyle" value="studio" '+(style==='studio'?'checked':'')+'><span><b>Студийные</b><small>Товарная карточка с аккуратной студийной подачей.</small></span></label></div><p class="cards-note">Сейчас это только заготовки: изображения появятся после подключения обработчика.</p>'+previews+'</div></section>';
 }
 function photosHtml(d){
  return '<div class="photo-editor-head"><b>Фотографии</b><span class="meta">'+d.photos.length+' / 10</span></div><div class="photo-grid">'+d.photos.map((p,i)=>'<div class="photo-tile"><img src="'+esc(p.src)+'" alt="Фото '+(i+1)+'"><button type="button" class="remove" data-action="photo-remove" data-index="'+i+'" aria-label="Удалить фото '+(i+1)+'">'+icon('close')+'</button>'+(i===0?'<span class="photo-order">Главное</span>':'<button type="button" class="photo-main" data-action="photo-main" data-index="'+i+'">На обложку</button>')+'</div>').join('')+(d.photos.length<10?'<button type="button" class="photo-add" data-action="photo-add">'+icon('plus')+'Добавить фото</button>':'')+'</div><input class="file-input" id="photo-files" type="file" accept="image/*" multiple><p class="help" style="margin-top:10px">Оригиналы фото сохраняются без обработки. До 10 фотографий.</p>';
 }
 function editPage(id){
  const d=getDraft(id),isNew=!id,back=isNew?'/list/queue':'/item/'+id;
- let fields=isNew?field('Что знаете о товаре','<textarea name="raw" rows="7" required placeholder="Состояние, размеры, дефекты, комплект, история…">'+esc(d.raw)+'</textarea>') :
+ let fields=isNew?field('Что знаете о товаре','<textarea name="raw" rows="5" required placeholder="Название, состояние, комплект, история…">'+esc(d.raw)+'</textarea>','Эти заметки сохранятся для последующей обработки.') :
  field('Заголовок','<input name="title" maxlength="50" required value="'+esc(d.title)+'">','До 50 символов')+field('Исходные заметки','<textarea name="raw" rows="5">'+esc(d.raw)+'</textarea>')+field('Описание объявления','<textarea name="description" rows="9">'+esc(d.description)+'</textarea>');
  fields+=field(isNew?'Желаемая цена, ₽':'Цена, ₽','<input name="price" type="number" min="0" max="1000000000" inputmode="numeric" value="'+(d.price??'')+'" placeholder="Необязательно">');
  if(!isNew)fields+=field('Время на получение, минут','<input name="pickupMinutes" type="number" inputmode="numeric" min="15" max="480" step="5" required value="'+d.pickupMinutes+'">','Учтите осмотр, разборку и вынос.')+'<label class="switch-row">Доставку можно обсудить<input name="delivery" type="checkbox" '+(d.delivery?'checked':'')+'></label>';
- return page(isNew?'Новое объявление':'Редактирование',back,'<form id="item-form">'+section('<div id="photo-editor">'+photosHtml(d)+'</div>')+section(fields)+'<div id="form-error" aria-live="polite"></div></form>', '<button class="btn primary" type="submit" form="item-form">'+(isNew?'Добавить объявление':'Сохранить изменения')+'</button>',true);
+ return page(isNew?'Новое объявление':'Редактирование',back,'<form id="item-form">'+section('<div id="photo-editor">'+photosHtml(d)+'</div>')+productFields(d)+section(fields)+cardsHtml(d)+'<div id="form-error" aria-live="polite"></div></form>', '<button class="btn primary" type="submit" form="item-form">'+(isNew?'Добавить объявление':'Сохранить изменения')+'</button>',true);
 }
 function commentsPage(x){return page('Комментарий для ИИ','/item/'+x.id,section('<h2>'+esc(x.title)+'</h2><p>Укажите, что нужно изменить, уточнить или учесть при обработке.</p><form id="comment-form">'+field('Комментарий','<textarea name="text" rows="6" required placeholder="Например: учесть царапины на корпусе и самовывоз вдвоём…"></textarea>')+'</form>')+section('<h2>Комментарии</h2>'+(x.comments.length?x.comments.slice().reverse().map(c=>'<div class="comment">'+esc(c.text)+'<small>'+stamp(c.createdAt)+' · Сохранён для обработки</small></div>').join(''):'<p>Комментариев пока нет.</p>')),'<button class="btn primary" form="comment-form" type="submit">Сохранить комментарий</button>');}
 function offersPage(x){
@@ -128,12 +137,14 @@ function inlineError(message){const el=document.getElementById('form-error');if(
 async function saveItem(form){
  if(photoBusy)throw Error('Дождитесь загрузки фотографий');
  const f=new FormData(form),isNew=draft.key==='new';
- const raw=String(f.get('raw')||'').trim();
- const data={...(isNew?{}:item(draft.id)),id:isNew?uid():draft.id,status:isNew?'queue':draft.status,title:isNew?(raw.split(/[\n.!?]/)[0]||'Новое объявление').slice(0,50):String(f.get('title')||'').trim(),raw,description:isNew?'':String(f.get('description')||''),photos:draft.photos,price:f.get('price')===''?null:Number(f.get('price')),pickupMinutes:isNew?60:Number(f.get('pickupMinutes')),delivery:!isNew&&f.has('delivery')};
+ const raw=String(f.get('raw')||'').trim(),productKind=f.get('productKind')==='batch'?'batch':'single';
+ const quantity=productKind==='batch'?Number(f.get('quantity')):null;
+ if(productKind==='batch'&&(!Number.isInteger(quantity)||quantity<1))throw Error('Укажите количество товара');
+ const data={...(isNew?{}:item(draft.id)),id:isNew?uid():draft.id,status:isNew?'queue':draft.status,title:isNew?(raw.split(/[\n.!?]/)[0]||'Новое объявление').slice(0,50):String(f.get('title')||'').trim(),raw,description:isNew?'':String(f.get('description')||''),photos:draft.photos,price:f.get('price')===''?null:Number(f.get('price')),pickupMinutes:isNew?60:Number(f.get('pickupMinutes')),delivery:!isNew&&f.has('delivery'),productKind,condition:productKind==='single'?(f.get('condition')==='new'?'new':'used'):null,size:String(f.get('size')||'').trim(),defects:String(f.get('defects')||'').trim(),quantity,generateCards:f.has('generateCards'),cardStyle:f.get('cardStyle')==='studio'?'studio':'realistic'};
  if(!raw&&isNew)throw Error('Добавьте заметки о товаре');
  if(data.pickupMinutes<15||data.pickupMinutes>480)throw Error('Укажите время получения от 15 до 480 минут');
  const event={id:uid(),type:'item.upsert',payload:normalItem(data)};
- await commit(s=>{const next=receiveEvent(s,event);next.outbox.push({id:uid(),type:isNew?'item.created':'item.edited',payload:{itemId:data.id},createdAt:new Date().toISOString()});return next;});
+ await commit(s=>{const next=receiveEvent(s,event),now=new Date().toISOString();next.outbox.push({id:uid(),type:isNew?'item.created':'item.edited',payload:{itemId:data.id,item:event.payload},createdAt:now});if(data.generateCards)next.outbox.push({id:uid(),type:'cards.requested',payload:{itemId:data.id,style:data.cardStyle,photoIds:data.photos.map(p=>p.id)},createdAt:now});return next;});
  draft=null;go(isNew?'/list/queue':'/item/'+data.id);toast(isNew?'Объявление добавлено':'Изменения сохранены');
 }
 root.addEventListener('submit',async e=>{
@@ -167,6 +178,7 @@ root.addEventListener('click',async e=>{
  if(action==='photo-add'){document.getElementById('photo-files').click();return;}
  if(action==='photo-remove'){draft.photos.splice(Number(b.dataset.index),1);refreshPhotos();return;}
  if(action==='photo-main'){draft.photos.unshift(...draft.photos.splice(Number(b.dataset.index),1));refreshPhotos();return;}
+ if(action==='cards-toggle'){draft.generateCards=b.checked;refreshCards();return;}
  if(action.startsWith('gallery-')){
  const track=document.getElementById('gallery-track');let i=action==='gallery-at'?Number(b.dataset.index):galleryIndex+(action==='gallery-next'?1:-1);
  i=Math.max(0,Math.min(track.children.length-1,i));track.scrollTo({left:i*track.clientWidth,behavior:'smooth'});return;
@@ -190,7 +202,9 @@ root.addEventListener('click',async e=>{
  }
  }catch(err){toast(err.message);}finally{if(b.isConnected)b.disabled=false;}
 });
-function refreshPhotos(){const el=document.getElementById('photo-editor');if(el)el.innerHTML=photosHtml(draft);}
+function refreshPhotos(){const el=document.getElementById('photo-editor');if(el)el.innerHTML=photosHtml(draft);refreshCards();}
+function refreshCards(){const el=document.getElementById('cards-config');if(!el||!draft)return;const temp=document.createElement('div');temp.innerHTML=cardsHtml(draft);const next=temp.querySelector('#cards-config');if(next)el.replaceWith(next);}
+function syncProductFields(){const kind=document.querySelector('input[name=productKind]:checked')?.value||'single';document.querySelector('.product-single')?.classList.toggle('is-hidden',kind!=='single');document.querySelector('.product-batch')?.classList.toggle('is-hidden',kind!=='batch');}
 function fileData(file){return new Promise((resolve,reject)=>{const r=new FileReader();r.onload=()=>resolve(r.result);r.onerror=()=>reject(Error('Не удалось прочитать фото '+file.name));r.readAsDataURL(file);});}
 
 async function ingestPhotos(files,input){
@@ -208,6 +222,8 @@ async function ingestPhotos(files,input){
 }
 root.addEventListener('change',async e=>{
  const input=e.target;
+ if(input.name==='productKind'){if(draft)draft.productKind=input.value==='batch'?'batch':'single';syncProductFields();return;}
+ if(input.name==='cardStyle'&&draft){draft.cardStyle=input.value==='studio'?'studio':'realistic';refreshCards();return;}
  if(input.id==='booking-slot'){const r=route();go('/item/'+r.parts[1]+'/book/'+r.parts[3]+'?slot='+input.value);return;}
  if(input.id==='photo-files')await ingestPhotos(Array.from(input.files||[]),input);
 });
