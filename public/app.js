@@ -3,7 +3,7 @@ import {readState,saveState} from './data.js?v=6';
 import {uid,todayKey,normalItem,receiveEvent,addSlot,addBooking,freeTimes,dayLoad,minutes} from './model.js?v=6';
 const root=document.getElementById('app');
 const CONNECTION_KEY='avitolog-bridge-connection-v1';
-let state,unlocked=false,bridgeConnection=null,draft=null,galleryIndex=0,toastTimer,photoBusy=false,commitQueue=Promise.resolve();
+let state,unlocked=false,bridgeConnection=null,draft=null,galleryIndex=0,toastTimer,photoBusy=false,commitQueue=Promise.resolve(),bridgeSyncing=false,bridgeSyncTimer;
 const icons={
  back:'<path d="m15 5-7 7 7 7"/>',close:'<path d="m6 6 12 12M18 6 6 18"/>',
  plus:'<path d="M12 5v14M5 12h14"/>',calendar:'<rect x="3" y="5" width="18" height="16" rx="3"/><path d="M7 3v4m10-4v4M3 10h18m-13 5h.01M12 15h.01M17 15h.01"/>',
@@ -26,7 +26,21 @@ const stamp=d=>new Date(d).toLocaleString('ru-RU',{timeZone:'Europe/Moscow',day:
 const route=()=>{const [path,query='']=(location.hash.slice(1)||'/analytics').split('?');return {path,parts:path.split('/').filter(Boolean),params:new URLSearchParams(query)};};
 function go(path){if(location.hash==='#'+path)render();else location.hash=path;}
 function toast(message){clearTimeout(toastTimer);const el=document.getElementById('notifications');el.innerHTML='<div class="toast">'+esc(message)+'</div>';toastTimer=setTimeout(()=>el.innerHTML='',4200);}
-async function commit(transform){const job=commitQueue.then(async()=>{const next=await transform(structuredClone(state));await saveState(next);state=next;return state;});commitQueue=job.catch(()=>{});return job;}
+async function commit(transform){const job=commitQueue.then(async()=>{const next=await transform(structuredClone(state));await saveState(next);state=next;queueBridgeSync();return state;});commitQueue=job.catch(()=>{});return job;}
+function queueBridgeSync(){clearTimeout(bridgeSyncTimer);bridgeSyncTimer=setTimeout(()=>{syncBridge();},0);}
+async function syncBridge(){
+ if(bridgeSyncing||!state||!bridgeConnection?.bridgeUrl||!bridgeConnection?.accessKey)return;
+ if(!/^https?:\/\//i.test(bridgeConnection.bridgeUrl))return;
+ bridgeSyncing=true;
+ try{
+  for(const task of state.outbox.filter(x=>!x.deliveredAt)){
+   let response;
+   try{response=await fetch(bridgeConnection.bridgeUrl+'/api/v1/events',{method:'POST',headers:{'Content-Type':'application/json','X-Avitolog-Key':bridgeConnection.accessKey},body:JSON.stringify({event:{id:task.id,type:task.type,payload:task.payload,createdAt:task.createdAt}})});}catch{return;}
+   if(!response.ok)return;
+   await commit(s=>{const saved=s.outbox.find(x=>x.id===task.id);if(saved)saved.deliveredAt=new Date().toISOString();return s;});
+  }
+ }finally{bridgeSyncing=false;}
+}
 const btn=(label,action,cls='')=>'<button type="button" class="btn '+cls+'" data-action="'+action+'">'+label+'</button>';
 const link=(label,href,cls='')=>'<a class="'+cls+'" '+(label===icon('back')?'aria-label="Назад" ':label===icon('close')?'aria-label="Закрыть" ':label===icon('next')?'aria-label="Вперёд" ':'')+'href="#'+esc(href)+'">'+label+'</a>';
 const section=(body,cls='')=>'<section class="section '+cls+'">'+body+'</section>';
@@ -250,7 +264,7 @@ window.avitologBridge=Object.freeze({
  export:()=>{if(!unlocked)throw Error('Сначала подключите сервер');return structuredClone(state);}
 });
 async function boot(){
- try{bridgeConnection=JSON.parse(localStorage.getItem(CONNECTION_KEY)||'null');unlocked=!!(bridgeConnection?.bridgeUrl&&bridgeConnection?.accessKey);if(unlocked)state=await readState();render();}
+ try{bridgeConnection=JSON.parse(localStorage.getItem(CONNECTION_KEY)||'null');unlocked=!!(bridgeConnection?.bridgeUrl&&bridgeConnection?.accessKey);if(unlocked){state=await readState();queueBridgeSync();}render();}
  catch(e){root.innerHTML='<main class="login"><div class="login-card"><h1>Не удалось открыть хранилище</h1><p>'+esc(e.message)+'</p><p>Разрешите хранение данных для сайта и обновите страницу.</p></div></main>';}
 }
 boot();
