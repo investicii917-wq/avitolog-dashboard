@@ -1,6 +1,6 @@
 
-import {readState,saveState,AUTH_KEY} from './data.js?v=5';
-import {uid,todayKey,normalItem,receiveEvent,addSlot,addBooking,freeTimes,dayLoad,minutes} from './model.js?v=5';
+import {readState,saveState,AUTH_KEY} from './data.js?v=6';
+import {uid,todayKey,normalItem,receiveEvent,addSlot,addBooking,freeTimes,dayLoad,minutes} from './model.js?v=6';
 const root=document.getElementById('app');
 let state,unlocked=false,draft=null,galleryIndex=0,toastTimer,photoBusy=false,commitQueue=Promise.resolve();
 const icons={
@@ -40,8 +40,10 @@ function statusIndicator(status){return '<span class="processing-status '+(statu
 function analyticsPage(){
  const colors=['#d1b16b','#b77949','#98515a','#8b755b','#6e6870'],rows=state.items.filter(x=>x.status==='published').map((x,i)=>({item:x,value:Math.max(Number(x.stats?.contacts)||0,(x.offers||[]).length),color:colors[i%colors.length]})),total=rows.reduce((n,x)=>n+x.value,0),data=rows.map(x=>({...x,percent:total?Math.round(x.value/total*100):0}));
  let at=0;const segments=total?data.map(x=>{const from=at;at+=x.percent;return x.color+' '+from+'% '+at+'%'}).join(', '):'#e7e2da 0 100%';
- const legend=data.length?data.map(x=>'<div class="interest-row"><i style="background:'+x.color+'"></i><span>'+esc(x.item.title)+'</span><b>'+x.percent+'%</b></div>').join(''):'<p>Опубликованных объявлений пока нет.</p>';
- return header('analytics')+'<main class="container analytics"><section class="analytics-top">'+link(icon('comment')+'Смотреть предложения','/offers','btn accent block')+'</section><section class="interest-card"><h1>Интерес к объявлениям</h1><div class="interest-ring" style="background:conic-gradient('+segments+')"><div><b>'+total+'</b><span>'+plural(total,'интерес','интереса','интересов')+'</span></div></div><div class="interest-legend">'+legend+'</div></section></main>';}
+ const top=section('<h1>Аналитика</h1><p>Данные появятся после первых событий от MCP-сервера.</p>');
+ const chart=data.length?'<section class="interest-card"><h1>Интерес к объявлениям</h1><div class="interest-ring" style="background:conic-gradient('+segments+')"><div><b>'+total+'</b><span>'+plural(total,'интерес','интереса','интересов')+'</span></div></div><div class="interest-legend">'+data.map(x=>'<div class="interest-row"><i style="background:'+x.color+'"></i><span>'+esc(x.item.title)+'</span><b>'+x.percent+'%</b></div>').join('')+'</div></section>':'';
+ return header('analytics')+'<main class="container analytics"><section class="analytics-top">'+link(icon('comment')+'Смотреть предложения','/offers','btn accent block')+'</section>'+(!data.length?top:chart)+'</main>';
+}
 function allOffersPage(){
  const offers=state.items.flatMap(x=>(x.offers||[]).filter(o=>o.status==='pending').map(o=>({item:x,offer:o}))).sort((a,b)=>String(b.offer.createdAt).localeCompare(String(a.offer.createdAt)));
  return page('Предложения','/analytics',offers.length?'<div class="list global-offers">'+offers.map(({item:x,offer:o})=>link('<div class="thumb">'+(x.photos[0]?'<img src="'+esc(x.photos[0].src)+'" alt="">':icon('photo'))+'</div><div class="row-info"><div class="row-title">'+esc(x.title)+'</div><div class="offer-price-line">Ваша цена '+money(x.price)+' · <b>'+money(o.price)+'</b></div></div><div class="offer-delivery">'+(o.method==='delivery'?icon('box')+'<small>Доставка</small>':'')+'</div>','/item/'+x.id+'/offers','item-row')).join('')+'</div>':section('<p>Новых предложений пока нет.</p>'));}

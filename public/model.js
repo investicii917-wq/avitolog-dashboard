@@ -1,10 +1,10 @@
 
-export const VERSION = 3;
+export const VERSION = 4;
 export const todayKey = () => new Intl.DateTimeFormat('sv-SE', {timeZone:'Europe/Moscow',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
 export const uid = () => crypto.randomUUID();
 export const minutes = time => { if(!/^\d{2}:\d{2}$/.test(time||'')) return NaN; const [h,m]=time.split(':').map(Number); return h<24&&m<60?h*60+m:NaN; };
 export const toTime = n => String(Math.floor(n/60)).padStart(2,'0')+':'+String(n%60).padStart(2,'0');
-export const blankState = () => ({version:VERSION,items:[],slots:[],bookings:[],outbox:[],eventIds:[]});
+export const blankState = () => ({version:VERSION,items:[],slots:[],bookings:[],outbox:[],eventIds:[],newDraft:null});
 export function normalItem(x) {
  if(!x.id || !['queue','ready','published','sold'].includes(x.status)) throw Error('Некорректное объявление');
  const price=x.price==null||x.price===''?null:Number(x.price);
@@ -66,16 +66,4 @@ export function dayLoad(state,date){
  const used=state.bookings.filter(x=>x.date===date&&x.status!=='cancelled').reduce((a,x)=>a+minutes(x.to)-minutes(x.from),0);
  return used===0?'open':used>=total?'full':used/total>=.65?'busy':'some';
 }
-export function sampleState(){
- let s=blankState();
- const next=new Date(todayKey()+'T12:00:00');next.setDate(next.getDate()+1);
- const tomorrow=next.getFullYear()+'-'+String(next.getMonth()+1).padStart(2,'0')+'-'+String(next.getDate()).padStart(2,'0');
- const events=[
- {id:'sample-gym-created',type:'item.upsert',payload:{id:'gym',status:'queue',title:'Силовой тренажёр',raw:'Домашний силовой тренажёр. Для выноса потребуется частичная разборка.',price:20000,pickupMinutes:90}},
- {id:'sample-gym-ready',type:'item.upsert',payload:{id:'gym',status:'ready',description:'Силовой тренажёр для домашних занятий.\n\nПеред публикацией уточните модель, габариты, комплектацию и состояние. Для самовывоза предусмотрено 90 минут: потребуется частичная разборка и вынос.',fast:18000,optimal:20000,slow:23000}},
- {id:'sample-treadmill',type:'item.upsert',payload:{id:'treadmill',status:'published',title:'Беговая дорожка',price:28500,pickupMinutes:60,raw:'Складная беговая дорожка. Есть транспортировочные ролики.',description:'Складная беговая дорожка для домашних тренировок.\n\nОсмотр при встрече. Основной способ получения — самовывоз.',stats:{views:94,favorites:11,contacts:4}}},
- {id:'sample-offer-1',type:'offer.upsert',payload:{id:'offer-ivan',itemId:'treadmill',buyer:'Иван',price:26000,method:'pickup',preferredDate:tomorrow,preferredTime:'15:00',messageCount:4,note:'Могу приехать с помощником. Потребуется место для погрузки.'}},
- {id:'sample-offer-2',type:'offer.upsert',payload:{id:'offer-anna',itemId:'treadmill',buyer:'Анна',price:27500,method:'delivery',preferredDate:tomorrow,preferredTime:'18:00',messageCount:2,note:'Можно обсудить доставку? Оплачу отдельно.'}}
- ];
- events.forEach(e=>s=receiveEvent(s,e));return s;
-}
+export function sampleState(){ return blankState(); }
