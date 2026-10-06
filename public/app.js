@@ -1,8 +1,9 @@
 
-import {readState,saveState,AUTH_KEY} from './data.js?v=6';
+import {readState,saveState} from './data.js?v=6';
 import {uid,todayKey,normalItem,receiveEvent,addSlot,addBooking,freeTimes,dayLoad,minutes} from './model.js?v=6';
 const root=document.getElementById('app');
-let state,unlocked=false,draft=null,galleryIndex=0,toastTimer,photoBusy=false,commitQueue=Promise.resolve();
+const CONNECTION_KEY='avitolog-bridge-connection-v1';
+let state,unlocked=false,bridgeConnection=null,draft=null,galleryIndex=0,toastTimer,photoBusy=false,commitQueue=Promise.resolve();
 const icons={
  back:'<path d="m15 5-7 7 7 7"/>',close:'<path d="m6 6 12 12M18 6 6 18"/>',
  plus:'<path d="M12 5v14M5 12h14"/>',calendar:'<rect x="3" y="5" width="18" height="16" rx="3"/><path d="M7 3v4m10-4v4M3 10h18m-13 5h.01M12 15h.01M17 15h.01"/>',
@@ -106,7 +107,7 @@ function bookingPage(x,offerId,params){
 }
 function missing(){return page('Страница не найдена','/list/queue',section('<p>Объявление или интервал уже недоступны.</p>'));}
 function render(){
- if(!unlocked){loginPage();return;}
+ if(!unlocked){connectionPage();return;}
  if(!state){root.innerHTML='<div class="loading">Открываем объявления…</div>';return;}
  const {parts,params}=route();galleryIndex=0;
  if(parts[0]!=='new'&&!(parts[0]==='item'&&parts[2]==='edit'))draft=null;
@@ -124,8 +125,26 @@ function render(){
  const track=document.getElementById('gallery-track');
  if(track)track.addEventListener('scroll',()=>{galleryIndex=Math.round(track.scrollLeft/track.clientWidth);document.getElementById('gallery-counter').textContent=(galleryIndex+1)+' / '+track.children.length;},{passive:true});
 }
-function loginPage(){
- root.innerHTML='<main class="login"><form class="login-card" id="login-form"><h1>Авитолог</h1><p>Введите пароль. На этом устройстве вход сохранится.</p>'+field('Пароль','<input name="password" type="password" required autocomplete="current-password" aria-label="Пароль">')+'<div id="form-error" aria-live="polite"></div><button class="btn primary">Войти</button></form></main>';
+function connectionPage(){
+ const saved=bridgeConnection||{};
+ root.innerHTML='<main class="login connection"><form class="login-card" id="connection-form"><span class="connection-kicker">АВИТОЛОГ</span><h1>Подключение</h1><p>Выберите свой сервер и вставьте строку доступа, которую он создал.</p>'+field('Сервер','<select name="server" aria-label="Сервер"><option value="avitolog-bridge">Мост Авитолога</option></select>')+field('Адрес сервера','<input name="bridgeUrl" type="url" inputmode="url" autocomplete="url" required placeholder="https://…" value="'+esc(saved.bridgeUrl||'')+'">')+field('Строка подключения','<input name="accessKey" type="password" autocomplete="off" autocapitalize="none" spellcheck="false" required placeholder="Ключ моста" value="'+esc(saved.accessKey||'')+'">','Сохраняется только в браузере этого устройства.')+'<div id="form-error" aria-live="polite"></div><button class="btn primary">Подключить</button></form></main>';
+}
+function normalBridgeUrl(value){
+ const url=new URL(String(value||'').trim());
+ if(!['https:','http:'].includes(url.protocol))throw Error('Укажите адрес сервера с http:// или https://');
+ return url.href.replace(/\/$/,'');
+}
+async function connectBridge(form){
+ const data=new FormData(form),bridgeUrl=normalBridgeUrl(data.get('bridgeUrl')),accessKey=String(data.get('accessKey')||'').trim();
+ if(!accessKey)throw Error('Вставьте строку подключения');
+ let response;
+ try{response=await fetch(bridgeUrl+'/api/v1/state',{headers:{'X-Avitolog-Key':accessKey},cache:'no-store'});}
+ catch{throw Error('Сервер недоступен. Проверьте адрес и его запуск.');}
+ if(response.status===401)throw Error('Строка подключения не подошла этому серверу');
+ if(!response.ok)throw Error('Сервер ответил с ошибкой '+response.status);
+ bridgeConnection={server:String(data.get('server')||'avitolog-bridge'),bridgeUrl,accessKey};
+ localStorage.setItem(CONNECTION_KEY,JSON.stringify(bridgeConnection));
+ unlocked=true;state=await readState();render();
 }
 function inlineError(message){const el=document.getElementById('form-error');if(el)el.innerHTML='<p class="inline-error">'+esc(message)+'</p>';else toast(message);}
 async function saveItem(form){
@@ -145,10 +164,8 @@ root.addEventListener('submit',async e=>{
  e.preventDefault();const form=e.target;if(!form.checkValidity()){form.reportValidity();return;}
  const id=form.id,f=new FormData(form),submitter=e.submitter; if(submitter)submitter.disabled=true;
  try{
- if(id==='login-form'){
- if(f.get('password')!=='132213')throw Error('Неверный пароль');
- localStorage.setItem(AUTH_KEY,'yes');unlocked=true;state=await readState();render();
- }else if(id==='item-form')await saveItem(form);
+ if(id==='connection-form')await connectBridge(form);
+ else if(id==='item-form')await saveItem(form);
  else if(id==='price-form'){await updateItem({price:Number(f.get('price'))});render();toast('Цена сохранена');}
  else if(id==='comment-form'){
  const text=String(f.get('text')||'').trim();if(!text)throw Error('Напишите комментарий');
@@ -234,11 +251,11 @@ root.addEventListener('paste',async e=>{
 root.addEventListener('input',e=>{if(e.target.hasAttribute('data-time-input')){const digits=e.target.value.replace(/\D/g,'').slice(0,4);e.target.value=digits.slice(0,2)+(digits.length>2?':'+digits.slice(2):'');}if(draft?.key==='new'&&e.target.closest('#item-form'))syncNewDraft();});
 window.addEventListener('hashchange',()=>{window.scrollTo(0,0);render();});
 window.avitologBridge=Object.freeze({
- receive:async event=>{if(!unlocked)throw Error('Сначала войдите в кабинет');await commit(s=>receiveEvent(s,event));render();return {ok:true,eventId:event.id};},
- export:()=>{if(!unlocked)throw Error('Сначала войдите в кабинет');return structuredClone(state);}
+ receive:async event=>{if(!unlocked)throw Error('Сначала подключите сервер');await commit(s=>receiveEvent(s,event));render();return {ok:true,eventId:event.id};},
+ export:()=>{if(!unlocked)throw Error('Сначала подключите сервер');return structuredClone(state);}
 });
 async function boot(){
- try{unlocked=localStorage.getItem(AUTH_KEY)==='yes';if(unlocked)state=await readState();render();}
+ try{bridgeConnection=JSON.parse(localStorage.getItem(CONNECTION_KEY)||'null');unlocked=!!(bridgeConnection?.bridgeUrl&&bridgeConnection?.accessKey);if(unlocked)state=await readState();render();}
  catch(e){root.innerHTML='<main class="login"><div class="login-card"><h1>Не удалось открыть хранилище</h1><p>'+esc(e.message)+'</p><p>Разрешите хранение данных для сайта и обновите страницу.</p></div></main>';}
 }
 boot();
