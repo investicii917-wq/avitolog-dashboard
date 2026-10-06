@@ -25,4 +25,3 @@ export async function readState(){
  if(s&&s.version===VERSION)return s;
  const initial=sampleState();await saveState(initial);return initial;
 }
-export const AUTH_KEY='avitolog-unlocked-v3';
