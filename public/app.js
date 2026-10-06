@@ -127,7 +127,7 @@ function render(){
 }
 function connectionPage(){
  const saved=bridgeConnection||{};
- root.innerHTML='<main class="login connection"><form class="login-card" id="connection-form"><span class="connection-kicker">АВИТОЛОГ</span><h1>Подключение</h1><p>Выберите свой сервер и вставьте строку доступа, которую он создал.</p>'+field('Сервер','<select name="server" aria-label="Сервер"><option value="avitolog-bridge">Мост Авитолога</option></select>')+field('Адрес сервера','<input name="bridgeUrl" type="url" inputmode="url" autocomplete="url" required placeholder="https://…" value="'+esc(saved.bridgeUrl||'')+'">')+field('Строка подключения','<input name="accessKey" type="password" autocomplete="off" autocapitalize="none" spellcheck="false" required placeholder="Ключ моста" value="'+esc(saved.accessKey||'')+'">','Сохраняется только в браузере этого устройства.')+'<div id="form-error" aria-live="polite"></div><button class="btn primary">Подключить</button></form></main>';
+ root.innerHTML='<main class="login connection"><form class="login-card" id="connection-form"><span class="connection-kicker">АВИТОЛОГ</span><h1>Подключение</h1><p>Выберите свой сервер и вставьте строку доступа. Маршрут можно сохранить заранее: проверка связи начнётся, когда сервер будет запущен.</p>'+field('Сервер','<select name="server" aria-label="Сервер"><option value="avitolog-bridge">Мост Авитолога</option></select>')+field('Адрес сервера','<input name="bridgeUrl" type="url" inputmode="url" autocomplete="url" required placeholder="https://…" value="'+esc(saved.bridgeUrl||'')+'">')+field('Строка подключения','<input name="accessKey" type="password" autocomplete="off" autocapitalize="none" spellcheck="false" required placeholder="Ключ моста" value="'+esc(saved.accessKey||'')+'">','Сохраняется только в браузере этого устройства.')+'<div id="form-error" aria-live="polite"></div><button class="btn primary">Сохранить подключение</button></form></main>';
 }
 function normalBridgeUrl(value){
  const url=new URL(String(value||'').trim());
@@ -137,11 +137,6 @@ function normalBridgeUrl(value){
 async function connectBridge(form){
  const data=new FormData(form),bridgeUrl=normalBridgeUrl(data.get('bridgeUrl')),accessKey=String(data.get('accessKey')||'').trim();
  if(!accessKey)throw Error('Вставьте строку подключения');
- let response;
- try{response=await fetch(bridgeUrl+'/api/v1/state',{headers:{'X-Avitolog-Key':accessKey},cache:'no-store'});}
- catch{throw Error('Сервер недоступен. Проверьте адрес и его запуск.');}
- if(response.status===401)throw Error('Строка подключения не подошла этому серверу');
- if(!response.ok)throw Error('Сервер ответил с ошибкой '+response.status);
  bridgeConnection={server:String(data.get('server')||'avitolog-bridge'),bridgeUrl,accessKey};
  localStorage.setItem(CONNECTION_KEY,JSON.stringify(bridgeConnection));
  unlocked=true;state=await readState();render();
