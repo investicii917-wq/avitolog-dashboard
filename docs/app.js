@@ -127,12 +127,12 @@ function render(){
 }
 function connectionPage(){
  const saved=bridgeConnection||{};
- root.innerHTML='<main class="login connection"><form class="login-card" id="connection-form"><span class="connection-kicker">АВИТОЛОГ</span><h1>Подключение</h1><p>Выберите свой сервер и вставьте строку доступа. Маршрут можно сохранить заранее: проверка связи начнётся, когда сервер будет запущен.</p>'+field('Сервер','<select name="server" aria-label="Сервер"><option value="avitolog-bridge">Мост Авитолога</option></select>')+field('Адрес сервера','<input name="bridgeUrl" type="url" inputmode="url" autocomplete="url" required placeholder="https://…" value="'+esc(saved.bridgeUrl||'')+'">')+field('Строка подключения','<input name="accessKey" type="password" autocomplete="off" autocapitalize="none" spellcheck="false" required placeholder="Ключ моста" value="'+esc(saved.accessKey||'')+'">','Сохраняется только в браузере этого устройства.')+'<div id="form-error" aria-live="polite"></div><button class="btn primary">Сохранить подключение</button></form></main>';
+ root.innerHTML='<main class="login connection"><form class="login-card" id="connection-form"><span class="connection-kicker">АВИТОЛОГ</span><h1>Подключение</h1><p>Сохраните маршрут и строку доступа. Сервер проверит их, когда появится на связи.</p>'+field('Сервер','<select name="server" aria-label="Сервер"><option value="avitolog-bridge">Мост Авитолога</option></select>')+field('Адрес сервера','<input name="bridgeUrl" type="text" autocomplete="off" required placeholder="Адрес или имя сервера" value="'+esc(saved.bridgeUrl||'')+'">')+field('Строка подключения','<input name="accessKey" type="password" autocomplete="off" autocapitalize="none" spellcheck="false" required placeholder="Ключ моста" value="'+esc(saved.accessKey||'')+'">','Сохраняется только в браузере этого устройства.')+'<div id="form-error" aria-live="polite"></div><button class="btn primary">Сохранить подключение</button></form></main>';
 }
 function normalBridgeUrl(value){
- const url=new URL(String(value||'').trim());
- if(!['https:','http:'].includes(url.protocol))throw Error('Укажите адрес сервера с http:// или https://');
- return url.href.replace(/\/$/,'');
+ const route=String(value||'').trim();
+ if(!route)throw Error('Укажите адрес или имя сервера');
+ return route.replace(/\/$/,'');
 }
 async function connectBridge(form){
  const data=new FormData(form),bridgeUrl=normalBridgeUrl(data.get('bridgeUrl')),accessKey=String(data.get('accessKey')||'').trim();
