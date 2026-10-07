@@ -90,6 +90,7 @@ async function syncMailboxInbox(){
  for(const file of files){
   if(state.importedMailboxInbox?.includes(file.sha))continue;
   let event;try{event=await readMailboxJson('inbox',file);}catch{continue;}
+  if(event?.type==='item.deleted'&&event?.payload?.itemId){await commit(s=>{s.importedMailboxInbox??=[];s.deletedMailboxItemIds??=[];if(s.importedMailboxInbox.includes(file.sha))return s;s.items=s.items.filter(item=>item.id!==event.payload.itemId);s.deletedMailboxItemIds.push(event.payload.itemId);s.importedMailboxInbox.push(file.sha);return s;});continue;}
   const remote=event?.payload?.item||(event?.type==='item.upsert'?event.payload:null);if(!remote?.id)continue;
   const photos=await restoreMailboxPhotos('inbox',remote.photos);
   await commit(s=>{s.importedMailboxInbox??=[];if(s.importedMailboxInbox.includes(file.sha))return s;const index=s.items.findIndex(x=>x.id===remote.id),old=index>=0?s.items[index]:{};const next=normalItem({...old,...remote,photos,status:old.status==='ready'?'ready':(remote.status||'queue')});if(index>=0)s.items[index]=next;else s.items.unshift(next);s.importedMailboxInbox.push(file.sha);return s;});
@@ -106,7 +107,7 @@ async function syncMailboxResults(){
    if(state.processedMailboxResults?.includes(file.sha))continue;
    const contentResponse=await mailboxRequest('outbox/'+file.name);if(!contentResponse.ok)continue;
    let result;try{result=JSON.parse(base64Text((await contentResponse.json()).content));}catch{continue;}
-   if(result?.type!=='listing.ready'||!result.itemId||!result.listing)continue;
+   if(result?.type!=='listing.ready'||!result.itemId||!result.listing||state.deletedMailboxItemIds?.includes(result.itemId))continue;
    const source=result.item||{id:result.itemId,status:'queue',photos:result.photos||[]},photos=await restoreMailboxPhotos('outbox',source.photos?.length?source.photos:(result.photos||[]));
    await commit(s=>{s.processedMailboxResults??=[];if(s.processedMailboxResults.includes(file.sha))return s;const index=s.items.findIndex(x=>x.id===result.itemId),old=index>=0?s.items[index]:{};const next=normalItem({...old,...source,...result.listing,id:result.itemId,photos:photos.length?photos:(old.photos||[]),status:'ready',processedAt:result.processedAt||new Date().toISOString()});if(index>=0)s.items[index]=next;else s.items.unshift(next);s.processedMailboxResults.push(file.sha);return s;});
    toast('Объявление подготовлено к публикации');render();
@@ -148,7 +149,7 @@ function detailPage(x){
  const prices=x.status==='ready'?section('<h2>Цена продажи</h2><div class="price-choices">'+[['Быстрая',x.fast],['Оптимальная',x.optimal],['Долгая',x.slow]].map(([label,p])=>'<button class="price-choice '+(p===x.price?'active':'')+'" data-action="set-price" data-price="'+(p??'')+'" '+(p==null?'disabled':'')+'><small>'+label+'</small><b>'+money(p)+'</b></button>').join('')+'</div><form id="price-form" class="field"><label for="own-price">Своя цена, ₽</label><div class="inline-form"><input id="own-price" name="price" type="number" inputmode="numeric" min="0" max="1000000000" value="'+(x.price??'')+'" required><button class="btn">Сохранить</button></div></form>'):'';
  const raw=section('<h2>'+(x.status==='queue'?'Информация о товаре':'Исходные заметки')+'</h2><p class="text">'+esc(x.raw||'Заметок пока нет.')+'</p>');
  const desc=x.status!=='queue'||x.description?section('<h2>Описание объявления</h2><div class="description">'+esc(x.description||'Описание пока не составлено.')+'</div>'):'';
- return page(x.title,x.status==='published'||x.status==='sold'?'/list/published':'/list/ready',main+prices+actions+desc+raw,x.status==='ready'?link(icon('edit')+'Редактировать','/item/'+x.id+'/edit','btn')+btn('Опубликовать','publish','primary'):'');
+ return page(x.title,x.status==='published'||x.status==='sold'?'/list/published':'/list/ready',main+prices+actions+desc+raw+section(btn('Удалить объявление','delete-item','danger block'),'delete-zone'),x.status==='ready'?link(icon('edit')+'Редактировать','/item/'+x.id+'/edit','btn')+btn('Опубликовать','publish','primary'):'');
 }
 function getDraft(id){const key=id||'new',fresh={photos:[],title:'',raw:'',description:'',price:null,pickupMinutes:60,delivery:false,productKind:'single',condition:'used',defects:'',quantity:1,generateCards:false,cardStyle:'realistic'};if(!draft||draft.key!==key)draft={key,...(id?structuredClone(item(id)):structuredClone(state?.newDraft||fresh))};return draft;}
 function productFields(d){const kind=d.productKind==='batch'?'batch':'single',condition=d.condition==='new'?'new':'used';return '<section class="section product-section"><h2>Параметры товара</h2><div class="segmented" role="radiogroup" aria-label="Тип товара"><label><input type="radio" name="productKind" value="single" '+(kind==='single'?'checked':'')+'><span>Товар 1</span></label><label><input type="radio" name="productKind" value="batch" '+(kind==='batch'?'checked':'')+'><span>Товар тиражный</span></label></div><div class="product-single '+(kind==='single'?'':'is-hidden')+'"><div class="field-label">Состояние</div><div class="segmented condition" role="radiogroup" aria-label="Состояние"><label><input type="radio" name="condition" value="used" '+(condition==='used'?'checked':'')+'><span>Б/у</span></label><label><input type="radio" name="condition" value="new" '+(condition==='new'?'checked':'')+'><span>Новое</span></label></div></div><div class="product-batch '+(kind==='batch'?'':'is-hidden')+'">'+field('Количество штук','<input name="quantity" type="number" min="1" step="1" inputmode="numeric" value="'+(Number(d.quantity)||1)+'">','Укажите, сколько одинаковых единиц есть в наличии.')+'</div>'+field('Дефекты и нюансы','<textarea name="defects" rows="3" placeholder="Если есть — опишите честно. Это попадёт в обработку объявления.">'+esc(d.defects||'')+'</textarea>')+'</section>';}
@@ -284,6 +285,11 @@ root.addEventListener('click',async e=>{
  const x=item(route().parts[1]);if(!x.price||!x.title)throw Error('Укажите заголовок и цену перед публикацией');
  await commit(s=>{const a=s.items.find(i=>i.id===x.id);a.status='published';s.outbox.push({id:uid(),type:'item.publish',payload:{itemId:x.id},createdAt:new Date().toISOString()});return s;});
  go('/item/'+x.id);toast('Перемещено в «Публик.»');
+ }else if(action==='delete-item'){
+  const id=route().parts[1],x=item(id);if(!x)return;
+  if(!window.confirm('Are you sure? Точно хотите удалить это объявление?'))return;
+  await commit(s=>{s.items=s.items.filter(value=>value.id!==id);s.deletedMailboxItemIds??=[];if(!s.deletedMailboxItemIds.includes(id))s.deletedMailboxItemIds.push(id);s.outbox.push({id:uid(),type:'item.deleted',payload:{itemId:id},createdAt:new Date().toISOString()});return s;});
+  go('/list/ready');toast('Объявление удалено');
  }else if(action==='day-select'){
  const date=b.dataset.date;
  history.replaceState(null,'','#/calendar?month='+date.slice(0,7)+'&day='+date);
