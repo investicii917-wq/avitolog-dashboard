@@ -1,6 +1,6 @@
 
 import {readState,saveState} from './data.js?v=6';
-import {uid,todayKey,normalItem,receiveEvent,addSlot,addBooking,freeTimes,dayLoad,minutes} from './model.js?v=6';
+import {uid,todayKey,normalItem,receiveEvent,addSlot,addBooking,freeTimes,dayLoad,minutes} from './model.js?v=7';
 const root=document.getElementById('app');
 const CONNECTION_KEY='avitolog-bridge-connection-v1';
 let state,unlocked=false,bridgeConnection=null,draft=null,galleryIndex=0,toastTimer,photoBusy=false,commitQueue=Promise.resolve(),bridgeSyncing=false,bridgeSyncTimer;
@@ -26,8 +26,9 @@ const stamp=d=>new Date(d).toLocaleString('ru-RU',{timeZone:'Europe/Moscow',day:
 const route=()=>{const [path,query='']=(location.hash.slice(1)||'/analytics').split('?');return {path,parts:path.split('/').filter(Boolean),params:new URLSearchParams(query)};};
 function go(path){if(location.hash==='#'+path)render();else location.hash=path;}
 function toast(message){clearTimeout(toastTimer);const el=document.getElementById('notifications');el.innerHTML='<div class="toast">'+esc(message)+'</div>';toastTimer=setTimeout(()=>el.innerHTML='',4200);}
-async function commit(transform){const job=commitQueue.then(async()=>{const next=await transform(structuredClone(state));await saveState(next);state=next;queueBridgeSync();return state;});commitQueue=job.catch(()=>{});return job;}
-function queueBridgeSync(delay=0){clearTimeout(bridgeSyncTimer);bridgeSyncTimer=setTimeout(()=>{syncBridge();},delay);}
+async function commit(transform){const job=commitQueue.then(async()=>{const next=await transform(structuredClone(state));await saveState(next);state=next;void syncBridge();return state;});commitQueue=job.catch(()=>{});return job;}
+function queueBridgeSync(delay=0){clearTimeout(bridgeSyncTimer);bridgeSyncTimer=setTimeout(()=>{void syncBridge();},delay);}
+async function sendBridgeEvent(task){const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),12000);try{return await fetch(bridgeConnection.bridgeUrl+'/api/v1/events',{method:'POST',headers:{'Content-Type':'application/json','X-Avitolog-Key':bridgeConnection.accessKey},body:JSON.stringify({event:{id:task.id,type:task.type,payload:task.payload,createdAt:task.createdAt}}),signal:controller.signal});}finally{clearTimeout(timeout);}}
 async function syncBridge(){
  if(bridgeSyncing||!state||!bridgeConnection?.bridgeUrl||!bridgeConnection?.accessKey)return;
  if(!/^https?:\/\//i.test(bridgeConnection.bridgeUrl))return;
@@ -35,7 +36,7 @@ async function syncBridge(){
  try{
   for(const task of state.outbox.filter(x=>!x.deliveredAt)){
    let response;
-   try{response=await fetch(bridgeConnection.bridgeUrl+'/api/v1/events',{method:'POST',headers:{'Content-Type':'application/json','X-Avitolog-Key':bridgeConnection.accessKey},body:JSON.stringify({event:{id:task.id,type:task.type,payload:task.payload,createdAt:task.createdAt}})});}catch{queueBridgeSync(5000);return;}
+   try{response=await sendBridgeEvent(task);}catch{queueBridgeSync(5000);return;}
    if(!response.ok){queueBridgeSync(5000);return;}
    await commit(s=>{const saved=s.outbox.find(x=>x.id===task.id);if(saved)saved.deliveredAt=new Date().toISOString();return s;});
   }
@@ -84,7 +85,7 @@ function cardsHtml(d){const enabled=!!d.generateCards,style=d.cardStyle==='studi
 function photosHtml(d){
  return '<div class="photo-editor-head"><b>Фотографии</b><span class="meta">'+d.photos.length+' / 10</span></div><div class="photo-grid">'+d.photos.map((p,i)=>'<div class="photo-tile"><img src="'+esc(p.src)+'" alt="Фото '+(i+1)+'"><button type="button" class="remove" data-action="photo-remove" data-index="'+i+'" aria-label="Удалить фото '+(i+1)+'">'+icon('close')+'</button>'+(i===0?'<span class="photo-order">Главное</span>':'<button type="button" class="photo-main" data-action="photo-main" data-index="'+i+'">На обложку</button>')+'</div>').join('')+(d.photos.length<10?'<button type="button" class="photo-add" data-action="photo-add">'+icon('plus')+'Добавить фото</button>':'')+'</div><input class="file-input" id="photo-files" type="file" accept="image/*" multiple><p class="help" style="margin-top:10px">Оригиналы фото сохраняются без обработки. До 10 фотографий.</p>';
 }
-function editPage(id){const d=getDraft(id),isNew=!id,back=isNew?'/list/ready':'/item/'+id;let fields=isNew?field('Что знаете о товаре','<textarea name="raw" rows="7" required placeholder="Состояние, комплект, история…">'+esc(d.raw)+'</textarea>'):field('Заголовок','<input name="title" maxlength="50" required value="'+esc(d.title)+'">','До 50 символов')+field('Исходные заметки','<textarea name="raw" rows="5">'+esc(d.raw)+'</textarea>')+field('Описание объявления','<textarea name="description" rows="9">'+esc(d.description)+'</textarea>');fields+=field(isNew?'Желаемая цена, ₽':'Цена, ₽','<input name="price" type="number" min="0" max="1000000000" inputmode="numeric" value="'+(d.price??'')+'" placeholder="Необязательно">');if(!isNew)fields+=field('Время на получение, минут','<input name="pickupMinutes" type="number" inputmode="numeric" min="15" max="480" step="5" required value="'+d.pickupMinutes+'">','Учтите осмотр, разборку и вынос.')+'<label class="switch-row">Доставку можно обсудить<input name="delivery" type="checkbox" '+(d.delivery?'checked':'')+'></label>';return page(isNew?'Новое объявление':'Редактирование',back,'<form id="item-form">'+section('<div id="photo-editor">'+photosHtml(d)+'</div>')+section(fields)+cardsHtml(d)+productFields(d)+'<div id="form-error" aria-live="polite"></div></form>'+(isNew?section(btn('Удалить черновик','delete-draft','danger block'),'delete-zone'):''),'<button class="btn primary" type="submit" form="item-form">'+(isNew?'Добавить объявление':'Сохранить изменения')+'</button>',true);}
+function editPage(id){const d=getDraft(id),isNew=!id,back=isNew?'/list/ready':'/item/'+id;let fields=isNew?field('Что знаете о товаре','<textarea name="raw" rows="7" placeholder="Состояние, комплект, история…">'+esc(d.raw)+'</textarea>'):field('Заголовок','<input name="title" maxlength="50" required value="'+esc(d.title)+'">','До 50 символов')+field('Исходные заметки','<textarea name="raw" rows="5">'+esc(d.raw)+'</textarea>')+field('Описание объявления','<textarea name="description" rows="9">'+esc(d.description)+'</textarea>');fields+=field(isNew?'Желаемая цена, ₽':'Цена, ₽','<input name="price" type="number" min="0" max="1000000000" inputmode="numeric" value="'+(d.price??'')+'" placeholder="Необязательно">');if(!isNew)fields+=field('Время на получение, минут','<input name="pickupMinutes" type="number" inputmode="numeric" min="15" max="480" step="5" required value="'+d.pickupMinutes+'">','Учтите осмотр, разборку и вынос.')+'<label class="switch-row">Доставку можно обсудить<input name="delivery" type="checkbox" '+(d.delivery?'checked':'')+'></label>';return page(isNew?'Новое объявление':'Редактирование',back,'<form id="item-form">'+section('<div id="photo-editor">'+photosHtml(d)+'</div>')+section(fields)+cardsHtml(d)+productFields(d)+'<div id="form-error" aria-live="polite"></div></form>'+(isNew?section(btn('Удалить черновик','delete-draft','danger block'),'delete-zone'):''),'<button class="btn primary" type="submit" form="item-form">'+(isNew?'Добавить объявление':'Сохранить изменения')+'</button>',true);}
 function commentsPage(x){return page('Комментарий для ИИ','/item/'+x.id,section('<h2>'+esc(x.title)+'</h2><p>Укажите, что нужно изменить, уточнить или учесть при обработке.</p><form id="comment-form">'+field('Комментарий','<textarea name="text" rows="6" required placeholder="Например: учесть царапины на корпусе и самовывоз вдвоём…"></textarea>')+'</form>')+section('<h2>Комментарии</h2>'+(x.comments.length?x.comments.slice().reverse().map(c=>'<div class="comment">'+esc(c.text)+'<small>'+stamp(c.createdAt)+' · Сохранён для обработки</small></div>').join(''):'<p>Комментариев пока нет.</p>')),'<button class="btn primary" form="comment-form" type="submit">Сохранить комментарий</button>');}
 function offersPage(x){
  return page('Предложения','/item/'+x.id,section('<h2>'+esc(x.title)+'</h2><p>'+plural(x.offers.length,'предложение','предложения','предложений')+' · цена '+money(x.price)+'</p>')+
@@ -160,12 +161,11 @@ async function saveItem(form){
  if(photoBusy)throw Error('Дождитесь загрузки фотографий');
  const f=new FormData(form),isNew=draft.key==='new';
  const raw=String(f.get('raw')||'').trim(),productKind=f.get('productKind')==='batch'?'batch':'single';
- const quantity=productKind==='batch'?Number(f.get('quantity')):null;
- if(productKind==='batch'&&(!Number.isInteger(quantity)||quantity<1))throw Error('Укажите количество товара');
+ const quantity=productKind==='batch'?(Number(f.get('quantity'))||null):null;
  const data={...(isNew?{}:item(draft.id)),id:isNew?uid():draft.id,status:isNew?'queue':draft.status,title:isNew?(raw.split(/[\n.!?]/)[0]||'Новое объявление').slice(0,50):String(f.get('title')||'').trim(),raw,description:isNew?'':String(f.get('description')||''),photos:draft.photos,price:f.get('price')===''?null:Number(f.get('price')),pickupMinutes:isNew?60:Number(f.get('pickupMinutes')),delivery:!isNew&&f.has('delivery'),productKind,condition:productKind==='single'?(f.get('condition')==='new'?'new':'used'):null,defects:String(f.get('defects')||'').trim(),quantity,generateCards:f.has('generateCards'),cardStyle:f.get('cardStyle')==='studio'?'studio':'realistic'};
- if(!raw&&isNew)throw Error('Добавьте заметки о товаре');
  if(data.pickupMinutes<15||data.pickupMinutes>480)throw Error('Укажите время получения от 15 до 480 минут');
  const event={id:uid(),type:'item.upsert',payload:normalItem(data)};
+ if(isNew)clearTimeout(draftSaveTimer);
  await commit(s=>{const next=receiveEvent(s,event),now=new Date().toISOString();next.newDraft=null;next.outbox.push({id:uid(),type:isNew?'item.created':'item.edited',payload:{itemId:data.id,item:event.payload},createdAt:now});if(data.generateCards)next.outbox.push({id:uid(),type:'cards.requested',payload:{itemId:data.id,style:data.cardStyle,photoIds:data.photos.map(p=>p.id)},createdAt:now});return next;});
  draft=null;go(isNew?'/list/ready':'/item/'+data.id);toast(isNew?'Объявление добавлено':'Изменения сохранены');
 }

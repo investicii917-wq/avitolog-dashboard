@@ -11,8 +11,8 @@ export function normalItem(x) {
  if(price!==null&&(!Number.isFinite(price)||price<0)) throw Error('Укажите корректную цену');
  if((x.photos||[]).length>10) throw Error('Можно добавить не больше 10 фотографий');
  const productKind=x.productKind==='batch'?'batch':'single';
- const quantity=productKind==='batch'?Number(x.quantity):null;
- if(productKind==='batch'&&(!Number.isInteger(quantity)||quantity<1)) throw Error('Укажите корректное количество товара');
+ const suppliedQuantity=productKind==='batch'?Number(x.quantity):null;
+ const quantity=Number.isInteger(suppliedQuantity)&&suppliedQuantity>=1?suppliedQuantity:null;
  return {title:'Новое объявление',raw:'',description:'',photos:[],comments:[],price:null,fast:null,optimal:null,slow:null,pickupMinutes:60,delivery:false,stats:{views:0,favorites:0,contacts:0},offers:[],createdAt:new Date().toISOString(),productKind:'single',condition:'used',size:'',defects:'',quantity:null,generateCards:false,cardStyle:'realistic',...x,price,title:String(x.title||'Новое объявление').slice(0,50),productKind,condition:productKind==='single'?(x.condition==='new'?'new':'used'):null,size:String(x.size||'').slice(0,120),defects:String(x.defects||''),quantity,generateCards:!!x.generateCards,cardStyle:x.cardStyle==='studio'?'studio':'realistic'};
 }
 export function receiveEvent(state,event) {
