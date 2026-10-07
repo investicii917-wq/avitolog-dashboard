@@ -3,7 +3,7 @@ import {readState,saveState} from './data.js?v=6';
 import {uid,todayKey,normalItem,receiveEvent,addSlot,addBooking,freeTimes,dayLoad,minutes} from './model.js?v=7';
 const root=document.getElementById('app');
 const CONNECTION_KEY='avitolog-mailbox-connection-v1';
-let state,unlocked=false,mailboxConnection=null,draft=null,galleryIndex=0,toastTimer,photoBusy=false,commitQueue=Promise.resolve(),mailboxSyncing=false,mailboxSyncTimer;
+let state,unlocked=false,mailboxConnection=null,draft=null,galleryIndex=0,toastTimer,photoBusy=false,commitQueue=Promise.resolve(),mailboxSyncing=false,mailboxSyncTimer,mailboxResultSyncing=false,mailboxResultTimer;
 const icons={
  back:'<path d="m15 5-7 7 7 7"/>',close:'<path d="m6 6 12 12M18 6 6 18"/>',
  plus:'<path d="M12 5v14M5 12h14"/>',calendar:'<rect x="3" y="5" width="18" height="16" rx="3"/><path d="M7 3v4m10-4v4M3 10h18m-13 5h.01M12 15h.01M17 15h.01"/>',
@@ -26,8 +26,9 @@ const stamp=d=>new Date(d).toLocaleString('ru-RU',{timeZone:'Europe/Moscow',day:
 const route=()=>{const [path,query='']=(location.hash.slice(1)||'/analytics').split('?');return {path,parts:path.split('/').filter(Boolean),params:new URLSearchParams(query)};};
 function go(path){if(location.hash==='#'+path)render();else location.hash=path;}
 function toast(message){clearTimeout(toastTimer);const el=document.getElementById('notifications');el.innerHTML='<div class="toast">'+esc(message)+'</div>';toastTimer=setTimeout(()=>el.innerHTML='',4200);}
-async function commit(transform){const job=commitQueue.then(async()=>{const next=await transform(structuredClone(state));await saveState(next);state=next;void syncMailbox();return state;});commitQueue=job.catch(()=>{});return job;}
+async function commit(transform){const job=commitQueue.then(async()=>{const next=await transform(structuredClone(state));await saveState(next);state=next;void syncMailbox();void syncMailboxResults();return state;});commitQueue=job.catch(()=>{});return job;}
 function queueMailboxSync(delay=0){clearTimeout(mailboxSyncTimer);mailboxSyncTimer=setTimeout(()=>{void syncMailbox();},delay);}
+function queueMailboxResultSync(delay=0){clearTimeout(mailboxResultTimer);mailboxResultTimer=setTimeout(()=>{void syncMailboxResults();},delay);}
 const utcStamp=()=>{const d=new Date(),p=n=>String(n).padStart(2,'0');return d.getUTCFullYear()+p(d.getUTCMonth()+1)+p(d.getUTCDate())+p(d.getUTCHours())+p(d.getUTCMinutes())+p(d.getUTCSeconds());};
 const randomPart=()=>crypto.getRandomValues(new Uint32Array(1))[0].toString(36).padStart(7,'0');
 const textBase64=value=>{const bytes=new TextEncoder().encode(value);let binary='';for(const byte of bytes)binary+=String.fromCharCode(byte);return btoa(binary);};
@@ -69,6 +70,24 @@ async function syncMailbox(){
   }
  }finally{mailboxSyncing=false;if(state?.outbox.some(x=>!x.deliveredAt))queueMailboxSync(10000);}
 }
+const base64Text=value=>{const binary=atob(String(value||'').replace(/\s/g,'')),bytes=Uint8Array.from(binary,c=>c.charCodeAt(0));return new TextDecoder().decode(bytes);};
+async function syncMailboxResults(){
+ if(mailboxResultSyncing||!state||!mailboxConnection?.repo||!mailboxConnection?.accessKey)return;
+ mailboxResultSyncing=true;
+ try{
+  const listResponse=await mailboxRequest('outbox');if(!listResponse.ok)return;
+  const files=(await listResponse.json()).filter(file=>file.type==='file'&&file.name!=='.gitkeep'&&/\.(json|txt)$/i.test(file.name)).sort((a,b)=>String(a.name).localeCompare(String(b.name)));
+  for(const file of files){
+   if(state.processedMailboxResults?.includes(file.sha))continue;
+   const contentResponse=await mailboxRequest('outbox/'+file.name);if(!contentResponse.ok)continue;
+   let result;try{result=JSON.parse(base64Text((await contentResponse.json()).content));}catch{continue;}
+   if(result?.type!=='listing.ready'||!result.itemId||!result.listing)continue;
+   const current=state.items.find(x=>x.id===result.itemId);if(!current)continue;
+   await commit(s=>{s.processedMailboxResults??=[];if(s.processedMailboxResults.includes(file.sha))return s;const index=s.items.findIndex(x=>x.id===result.itemId);if(index>=0)s.items[index]=normalItem({...s.items[index],...result.listing,status:'ready',processedAt:result.processedAt||new Date().toISOString()});s.processedMailboxResults.push(file.sha);return s;});
+   toast('Объявление подготовлено к публикации');render();
+  }
+ }catch{}finally{mailboxResultSyncing=false;queueMailboxResultSync(15000);}
+}
 const btn=(label,action,cls='')=>'<button type="button" class="btn '+cls+'" data-action="'+action+'">'+label+'</button>';
 const link=(label,href,cls='')=>'<a class="'+cls+'" '+(label===icon('back')?'aria-label="Назад" ':label===icon('close')?'aria-label="Закрыть" ':label===icon('next')?'aria-label="Вперёд" ':'')+'href="#'+esc(href)+'">'+label+'</a>';
 const section=(body,cls='')=>'<section class="section '+cls+'">'+body+'</section>';
@@ -85,22 +104,7 @@ function analyticsPage(){
  let at=0;const segments=total?data.map(x=>{const from=at;at+=x.percent;return x.color+' '+from+'% '+at+'%'}).join(', '):'#e7e2da 0 100%';
  const top=section('<h1>Аналитика</h1><p>Данные появятся после первых обработанных объявлений.</p>');
  const chart=data.length?'<section class="interest-card"><h1>Интерес к объявлениям</h1><div class="interest-ring" style="background:conic-gradient('+segments+')"><div><b>'+total+'</b><span>'+plural(total,'интерес','интереса','интересов')+'</span></div></div><div class="interest-legend">'+data.map(x=>'<div class="interest-row"><i style="background:'+x.color+'"></i><span>'+esc(x.item.title)+'</span><b>'+x.percent+'%</b></div>').join('')+'</div></section>':'';
- return header('analytics')+'<main class="container analytics"><section class="analytics-top">'+link(icon('comment')+'Смотреть предложения','/offers','btn accent block')+link(icon('eye')+'Результаты обработки','/results','btn outline block')+'</section>'+(!data.length?top:chart)+'</main>';
-}
-function resultsPage(){return page('Результаты обработки','/analytics',section('<p>Здесь появятся ответы обработчика.</p><div id="results-list" class="results-list"><p class="meta">Нажмите «Обновить», чтобы получить новые результаты.</p></div>'),' <button class="btn primary" type="button" data-action="refresh-results">Обновить</button>');}
-async function readMailboxResults(){
- const list=await mailboxRequest('outbox');if(!list.ok)throw Error('Не удалось получить результаты');
- const files=(await list.json()).filter(file=>file.type==='file'&&file.name!=='.gitkeep').sort((a,b)=>b.name.localeCompare(a.name)).slice(0,20);
- const view=[];
- for(const file of files){
-  const extension=(file.name.split('.').pop()||'').toLowerCase();
-  const response=await mailboxRequest('outbox/'+file.name,{headers:{Accept:'application/vnd.github.raw+json'}});
-  if(!response.ok)continue;
-  if(['txt','md','json'].includes(extension))view.push('<article class="section"><h2>'+esc(file.name)+'</h2><pre class="text">'+esc((await response.text()).slice(0,20000))+'</pre></article>');
-  else if(['jpg','jpeg','png','gif','webp'].includes(extension)){const blob=await response.blob();view.push('<article class="section"><h2>'+esc(file.name)+'</h2><img class="result-image" src="'+URL.createObjectURL(blob)+'" alt="Результат обработки"></article>');}
-  else view.push('<article class="section"><h2>'+esc(file.name)+'</h2><p>Файл результата получен.</p></article>');
- }
- const target=document.getElementById('results-list');if(target)target.innerHTML=view.length?view.join(''):'<p class="meta">Результатов пока нет.</p>';
+ return header('analytics')+'<main class="container analytics"><section class="analytics-top">'+link(icon('comment')+'Смотреть предложения','/offers','btn accent block')+'</section>'+(!data.length?top:chart)+'</main>';
 }
 function allOffersPage(){
  const offers=state.items.flatMap(x=>(x.offers||[]).filter(o=>o.status==='pending').map(o=>({item:x,offer:o}))).sort((a,b)=>String(b.offer.createdAt).localeCompare(String(a.offer.createdAt)));
@@ -171,7 +175,6 @@ function render(){
  try{
  if(parts[0]==='new')root.innerHTML=editPage();
  else if(parts[0]==='analytics')root.innerHTML=analyticsPage();
- else if(parts[0]==='results')root.innerHTML=resultsPage();
  else if(parts[0]==='offers')root.innerHTML=allOffersPage();
  else if(parts[0]==='calendar')root.innerHTML=calendarPage(params);
  else if(parts[0]==='slot')root.innerHTML=parts[1]==='new'?slotEditor(params):schedulePage(parts[1]);
@@ -200,7 +203,7 @@ async function connectMailbox(form){
  try{response=await mailboxRequest('inbox');}catch{mailboxConnection=previous;throw Error('Не удалось подключиться к очереди');}
  if(!response.ok){mailboxConnection=previous;throw Error(response.status===401||response.status===403?'Секретный ключ не подходит':'Очередь недоступна. Проверьте репозиторий');}
  localStorage.setItem(CONNECTION_KEY,JSON.stringify(candidate));
- unlocked=true;state=await readState();render();
+ unlocked=true;state=await readState();queueMailboxResultSync();render();
 }
 function inlineError(message){const el=document.getElementById('form-error');if(el)el.innerHTML='<p class="inline-error">'+esc(message)+'</p>';else toast(message);}
 async function saveItem(form){
@@ -242,7 +245,6 @@ root.addEventListener('click',async e=>{
  const b=e.target.closest('[data-action]');if(!b||b.disabled)return;const action=b.dataset.action;
  try{
  if(action==='photo-add'){document.getElementById('photo-files').click();return;}
- if(action==='refresh-results'){b.disabled=true;await readMailboxResults();return;}
  if(action==='photo-remove'){draft.photos.splice(Number(b.dataset.index),1);refreshPhotos();return;}
  if(action==='photo-main'){draft.photos.unshift(...draft.photos.splice(Number(b.dataset.index),1));refreshPhotos();return;}
  if(action==='cards-toggle'){draft.generateCards=b.checked;refreshCards();queueDraftSave();return;}
@@ -307,7 +309,7 @@ root.addEventListener('paste',async e=>{
 root.addEventListener('input',e=>{if(e.target.hasAttribute('data-time-input')){const digits=e.target.value.replace(/\D/g,'').slice(0,4);e.target.value=digits.slice(0,2)+(digits.length>2?':'+digits.slice(2):'');}if(draft?.key==='new'&&e.target.closest('#item-form'))syncNewDraft();});
 window.addEventListener('hashchange',()=>{window.scrollTo(0,0);render();});
 async function boot(){
- try{mailboxConnection=JSON.parse(localStorage.getItem(CONNECTION_KEY)||'null');unlocked=!!(mailboxConnection?.repo&&mailboxConnection?.accessKey);if(unlocked){state=await readState();queueMailboxSync();}render();}
+ try{mailboxConnection=JSON.parse(localStorage.getItem(CONNECTION_KEY)||'null');unlocked=!!(mailboxConnection?.repo&&mailboxConnection?.accessKey);if(unlocked){state=await readState();queueMailboxSync();queueMailboxResultSync();}render();}
  catch(e){root.innerHTML='<main class="login"><div class="login-card"><h1>Не удалось открыть хранилище</h1><p>'+esc(e.message)+'</p><p>Разрешите хранение данных для сайта и обновите страницу.</p></div></main>';}
 }
 boot();
