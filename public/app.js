@@ -71,10 +71,35 @@ async function syncMailbox(){
  }finally{mailboxSyncing=false;if(state?.outbox.some(x=>!x.deliveredAt))queueMailboxSync(10000);}
 }
 const base64Text=value=>{const binary=atob(String(value||'').replace(/\s/g,'')),bytes=Uint8Array.from(binary,c=>c.charCodeAt(0));return new TextDecoder().decode(bytes);};
+async function readMailboxJson(folder,file){const response=await mailboxRequest(folder+'/'+file.name);if(!response.ok)throw Error('Не удалось прочитать файл очереди');return JSON.parse(base64Text((await response.json()).content));}
+const mediaType=photo=>photo.type||({jpg:'image/jpeg',jpeg:'image/jpeg',png:'image/png',gif:'image/gif',webp:'image/webp'}[(String(photo.file||'').split('.').pop()||'').toLowerCase()]||'image/jpeg');
+async function restoreMailboxPhotos(folder,photos){
+ const restored=[];
+ for(const photo of photos||[]){
+  if(photo.src){restored.push(photo);continue;}
+  if(!photo.file){restored.push(photo);continue;}
+  const response=await mailboxRequest(folder+'/'+photo.file);if(!response.ok)continue;
+  const content=(await response.json()).content;
+  restored.push({...photo,src:'data:'+mediaType(photo)+';base64,'+String(content||'').replace(/\s/g,'')});
+ }
+ return restored;
+}
+async function syncMailboxInbox(){
+ const listResponse=await mailboxRequest('inbox');if(!listResponse.ok)return;
+ const files=(await listResponse.json()).filter(file=>file.type==='file'&&/-text\.txt$/i.test(file.name)).sort((a,b)=>String(a.name).localeCompare(String(b.name)));
+ for(const file of files){
+  if(state.importedMailboxInbox?.includes(file.sha))continue;
+  let event;try{event=await readMailboxJson('inbox',file);}catch{continue;}
+  const remote=event?.payload?.item||(event?.type==='item.upsert'?event.payload:null);if(!remote?.id)continue;
+  const photos=await restoreMailboxPhotos('inbox',remote.photos);
+  await commit(s=>{s.importedMailboxInbox??=[];if(s.importedMailboxInbox.includes(file.sha))return s;const index=s.items.findIndex(x=>x.id===remote.id),old=index>=0?s.items[index]:{};const next=normalItem({...old,...remote,photos,status:old.status==='ready'?'ready':(remote.status||'queue')});if(index>=0)s.items[index]=next;else s.items.unshift(next);s.importedMailboxInbox.push(file.sha);return s;});
+ }
+}
 async function syncMailboxResults(){
  if(mailboxResultSyncing||!state||!mailboxConnection?.repo||!mailboxConnection?.accessKey)return;
  mailboxResultSyncing=true;
  try{
+  await syncMailboxInbox();
   const listResponse=await mailboxRequest('outbox');if(!listResponse.ok)return;
   const files=(await listResponse.json()).filter(file=>file.type==='file'&&file.name!=='.gitkeep'&&/\.(json|txt)$/i.test(file.name)).sort((a,b)=>String(a.name).localeCompare(String(b.name)));
   for(const file of files){
@@ -82,8 +107,8 @@ async function syncMailboxResults(){
    const contentResponse=await mailboxRequest('outbox/'+file.name);if(!contentResponse.ok)continue;
    let result;try{result=JSON.parse(base64Text((await contentResponse.json()).content));}catch{continue;}
    if(result?.type!=='listing.ready'||!result.itemId||!result.listing)continue;
-   const current=state.items.find(x=>x.id===result.itemId);if(!current)continue;
-   await commit(s=>{s.processedMailboxResults??=[];if(s.processedMailboxResults.includes(file.sha))return s;const index=s.items.findIndex(x=>x.id===result.itemId);if(index>=0)s.items[index]=normalItem({...s.items[index],...result.listing,status:'ready',processedAt:result.processedAt||new Date().toISOString()});s.processedMailboxResults.push(file.sha);return s;});
+   const source=result.item||{id:result.itemId,status:'queue',photos:result.photos||[]},photos=await restoreMailboxPhotos('outbox',source.photos?.length?source.photos:(result.photos||[]));
+   await commit(s=>{s.processedMailboxResults??=[];if(s.processedMailboxResults.includes(file.sha))return s;const index=s.items.findIndex(x=>x.id===result.itemId),old=index>=0?s.items[index]:{};const next=normalItem({...old,...source,...result.listing,id:result.itemId,photos:photos.length?photos:(old.photos||[]),status:'ready',processedAt:result.processedAt||new Date().toISOString()});if(index>=0)s.items[index]=next;else s.items.unshift(next);s.processedMailboxResults.push(file.sha);return s;});
    toast('Объявление подготовлено к публикации');render();
   }
  }catch{}finally{mailboxResultSyncing=false;queueMailboxResultSync(15000);}
