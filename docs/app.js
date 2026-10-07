@@ -2,8 +2,8 @@
 import {readState,saveState} from './data.js?v=6';
 import {uid,todayKey,normalItem,receiveEvent,addSlot,addBooking,freeTimes,dayLoad,minutes} from './model.js?v=7';
 const root=document.getElementById('app');
-const CONNECTION_KEY='avitolog-bridge-connection-v1';
-let state,unlocked=false,bridgeConnection=null,draft=null,galleryIndex=0,toastTimer,photoBusy=false,commitQueue=Promise.resolve(),bridgeSyncing=false,bridgeSyncTimer;
+const CONNECTION_KEY='avitolog-mailbox-connection-v1';
+let state,unlocked=false,mailboxConnection=null,draft=null,galleryIndex=0,toastTimer,photoBusy=false,commitQueue=Promise.resolve(),mailboxSyncing=false,mailboxSyncTimer;
 const icons={
  back:'<path d="m15 5-7 7 7 7"/>',close:'<path d="m6 6 12 12M18 6 6 18"/>',
  plus:'<path d="M12 5v14M5 12h14"/>',calendar:'<rect x="3" y="5" width="18" height="16" rx="3"/><path d="M7 3v4m10-4v4M3 10h18m-13 5h.01M12 15h.01M17 15h.01"/>',
@@ -26,21 +26,48 @@ const stamp=d=>new Date(d).toLocaleString('ru-RU',{timeZone:'Europe/Moscow',day:
 const route=()=>{const [path,query='']=(location.hash.slice(1)||'/analytics').split('?');return {path,parts:path.split('/').filter(Boolean),params:new URLSearchParams(query)};};
 function go(path){if(location.hash==='#'+path)render();else location.hash=path;}
 function toast(message){clearTimeout(toastTimer);const el=document.getElementById('notifications');el.innerHTML='<div class="toast">'+esc(message)+'</div>';toastTimer=setTimeout(()=>el.innerHTML='',4200);}
-async function commit(transform){const job=commitQueue.then(async()=>{const next=await transform(structuredClone(state));await saveState(next);state=next;void syncBridge();return state;});commitQueue=job.catch(()=>{});return job;}
-function queueBridgeSync(delay=0){clearTimeout(bridgeSyncTimer);bridgeSyncTimer=setTimeout(()=>{void syncBridge();},delay);}
-async function sendBridgeEvent(task){const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),12000);try{return await fetch(bridgeConnection.bridgeUrl+'/api/v1/events',{method:'POST',headers:{'Content-Type':'application/json','X-Avitolog-Key':bridgeConnection.accessKey},body:JSON.stringify({event:{id:task.id,type:task.type,payload:task.payload,createdAt:task.createdAt}}),signal:controller.signal});}finally{clearTimeout(timeout);}}
-async function syncBridge(){
- if(bridgeSyncing||!state||!bridgeConnection?.bridgeUrl||!bridgeConnection?.accessKey)return;
- if(!/^https?:\/\//i.test(bridgeConnection.bridgeUrl))return;
- bridgeSyncing=true;
+async function commit(transform){const job=commitQueue.then(async()=>{const next=await transform(structuredClone(state));await saveState(next);state=next;void syncMailbox();return state;});commitQueue=job.catch(()=>{});return job;}
+function queueMailboxSync(delay=0){clearTimeout(mailboxSyncTimer);mailboxSyncTimer=setTimeout(()=>{void syncMailbox();},delay);}
+const utcStamp=()=>{const d=new Date(),p=n=>String(n).padStart(2,'0');return d.getUTCFullYear()+p(d.getUTCMonth()+1)+p(d.getUTCDate())+p(d.getUTCHours())+p(d.getUTCMinutes())+p(d.getUTCSeconds());};
+const randomPart=()=>crypto.getRandomValues(new Uint32Array(1))[0].toString(36).padStart(7,'0');
+const textBase64=value=>{const bytes=new TextEncoder().encode(value);let binary='';for(const byte of bytes)binary+=String.fromCharCode(byte);return btoa(binary);};
+const dataUriBase64=value=>String(value||'').replace(/^data:[^;]+;base64,/,'');
+const mailboxPath=path=>'https://api.github.com/repos/'+mailboxConnection.repo.split('/').map(encodeURIComponent).join('/')+'/contents'+(path?'/'+path.split('/').map(encodeURIComponent).join('/'):'' );
+async function mailboxRequest(path,options={}){
+ const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),20000);
+ try{return await fetch(mailboxPath(path),{...options,headers:{Accept:'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28',Authorization:'Bearer '+mailboxConnection.accessKey,...(options.headers||{})},signal:controller.signal});}
+ finally{clearTimeout(timeout);}
+}
+function fileExtension(photo){const type=String(photo.type||'').toLowerCase();if(type.includes('png'))return 'png';if(type.includes('webp'))return 'webp';if(type.includes('gif'))return 'gif';return 'jpg';}
+function mailboxManifest(task,attachmentNames){
+ const payload=structuredClone(task.payload||{}),photos=payload?.item?.photos;
+ if(Array.isArray(photos))payload.item.photos=photos.map((photo,index)=>({id:photo.id,name:photo.name||('photo-'+(index+1)),type:photo.type||'image/jpeg',file:attachmentNames[index]||null}));
+ return JSON.stringify({id:task.id,type:task.type,createdAt:task.createdAt,payload,attachments:attachmentNames},null,2);
+}
+async function putMailboxFile(path,content,message){
+ const response=await mailboxRequest(path,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({message,content})});
+ if(!response.ok)throw Error('Не удалось передать данные в очередь');
+}
+async function sendMailboxEvent(task){
+ const prefix=utcStamp()+'-'+randomPart(),photos=Array.isArray(task.payload?.item?.photos)?task.payload.item.photos:[],attachmentNames=[];
+ for(let index=0;index<photos.length;index++){
+  const photo=photos[index],encoded=dataUriBase64(photo.src),extension=fileExtension(photo);
+  if(!encoded)continue;
+  const name=prefix+'-'+(index+1)+'-photo.'+extension;
+  await putMailboxFile('inbox/'+name,encoded,'Add attachment '+name);attachmentNames.push(name);
+ }
+ const name=prefix+'-text.txt',manifest=mailboxManifest(task,attachmentNames);
+ await putMailboxFile('inbox/'+name,textBase64(manifest),'Add announcement '+name);
+}
+async function syncMailbox(){
+ if(mailboxSyncing||!state||!mailboxConnection?.repo||!mailboxConnection?.accessKey)return;
+ mailboxSyncing=true;
  try{
   for(const task of state.outbox.filter(x=>!x.deliveredAt)){
-   let response;
-   try{response=await sendBridgeEvent(task);}catch{queueBridgeSync(5000);return;}
-   if(!response.ok){queueBridgeSync(5000);return;}
+   try{await sendMailboxEvent(task);}catch{queueMailboxSync(10000);return;}
    await commit(s=>{const saved=s.outbox.find(x=>x.id===task.id);if(saved)saved.deliveredAt=new Date().toISOString();return s;});
   }
- }finally{bridgeSyncing=false;if(state?.outbox.some(x=>!x.deliveredAt))queueBridgeSync(5000);}
+ }finally{mailboxSyncing=false;if(state?.outbox.some(x=>!x.deliveredAt))queueMailboxSync(10000);}
 }
 const btn=(label,action,cls='')=>'<button type="button" class="btn '+cls+'" data-action="'+action+'">'+label+'</button>';
 const link=(label,href,cls='')=>'<a class="'+cls+'" '+(label===icon('back')?'aria-label="Назад" ':label===icon('close')?'aria-label="Закрыть" ':label===icon('next')?'aria-label="Вперёд" ':'')+'href="#'+esc(href)+'">'+label+'</a>';
@@ -56,9 +83,24 @@ function statusIndicator(status){return '<span class="processing-status '+(statu
 function analyticsPage(){
  const colors=['#d1b16b','#b77949','#98515a','#8b755b','#6e6870'],rows=state.items.filter(x=>x.status==='published').map((x,i)=>({item:x,value:Math.max(Number(x.stats?.contacts)||0,(x.offers||[]).length),color:colors[i%colors.length]})),total=rows.reduce((n,x)=>n+x.value,0),data=rows.map(x=>({...x,percent:total?Math.round(x.value/total*100):0}));
  let at=0;const segments=total?data.map(x=>{const from=at;at+=x.percent;return x.color+' '+from+'% '+at+'%'}).join(', '):'#e7e2da 0 100%';
- const top=section('<h1>Аналитика</h1><p>Данные появятся после первых событий от MCP-сервера.</p>');
+ const top=section('<h1>Аналитика</h1><p>Данные появятся после первых обработанных объявлений.</p>');
  const chart=data.length?'<section class="interest-card"><h1>Интерес к объявлениям</h1><div class="interest-ring" style="background:conic-gradient('+segments+')"><div><b>'+total+'</b><span>'+plural(total,'интерес','интереса','интересов')+'</span></div></div><div class="interest-legend">'+data.map(x=>'<div class="interest-row"><i style="background:'+x.color+'"></i><span>'+esc(x.item.title)+'</span><b>'+x.percent+'%</b></div>').join('')+'</div></section>':'';
- return header('analytics')+'<main class="container analytics"><section class="analytics-top">'+link(icon('comment')+'Смотреть предложения','/offers','btn accent block')+'</section>'+(!data.length?top:chart)+'</main>';
+ return header('analytics')+'<main class="container analytics"><section class="analytics-top">'+link(icon('comment')+'Смотреть предложения','/offers','btn accent block')+link(icon('eye')+'Результаты обработки','/results','btn outline block')+'</section>'+(!data.length?top:chart)+'</main>';
+}
+function resultsPage(){return page('Результаты обработки','/analytics',section('<p>Здесь появятся ответы обработчика.</p><div id="results-list" class="results-list"><p class="meta">Нажмите «Обновить», чтобы получить новые результаты.</p></div>'),' <button class="btn primary" type="button" data-action="refresh-results">Обновить</button>');}
+async function readMailboxResults(){
+ const list=await mailboxRequest('outbox');if(!list.ok)throw Error('Не удалось получить результаты');
+ const files=(await list.json()).filter(file=>file.type==='file'&&file.name!=='.gitkeep').sort((a,b)=>b.name.localeCompare(a.name)).slice(0,20);
+ const view=[];
+ for(const file of files){
+  const extension=(file.name.split('.').pop()||'').toLowerCase();
+  const response=await mailboxRequest('outbox/'+file.name,{headers:{Accept:'application/vnd.github.raw+json'}});
+  if(!response.ok)continue;
+  if(['txt','md','json'].includes(extension))view.push('<article class="section"><h2>'+esc(file.name)+'</h2><pre class="text">'+esc((await response.text()).slice(0,20000))+'</pre></article>');
+  else if(['jpg','jpeg','png','gif','webp'].includes(extension)){const blob=await response.blob();view.push('<article class="section"><h2>'+esc(file.name)+'</h2><img class="result-image" src="'+URL.createObjectURL(blob)+'" alt="Результат обработки"></article>');}
+  else view.push('<article class="section"><h2>'+esc(file.name)+'</h2><p>Файл результата получен.</p></article>');
+ }
+ const target=document.getElementById('results-list');if(target)target.innerHTML=view.length?view.join(''):'<p class="meta">Результатов пока нет.</p>';
 }
 function allOffersPage(){
  const offers=state.items.flatMap(x=>(x.offers||[]).filter(o=>o.status==='pending').map(o=>({item:x,offer:o}))).sort((a,b)=>String(b.offer.createdAt).localeCompare(String(a.offer.createdAt)));
@@ -129,6 +171,7 @@ function render(){
  try{
  if(parts[0]==='new')root.innerHTML=editPage();
  else if(parts[0]==='analytics')root.innerHTML=analyticsPage();
+ else if(parts[0]==='results')root.innerHTML=resultsPage();
  else if(parts[0]==='offers')root.innerHTML=allOffersPage();
  else if(parts[0]==='calendar')root.innerHTML=calendarPage(params);
  else if(parts[0]==='slot')root.innerHTML=parts[1]==='new'?slotEditor(params):schedulePage(parts[1]);
@@ -141,19 +184,22 @@ function render(){
  if(track)track.addEventListener('scroll',()=>{galleryIndex=Math.round(track.scrollLeft/track.clientWidth);document.getElementById('gallery-counter').textContent=(galleryIndex+1)+' / '+track.children.length;},{passive:true});
 }
 function connectionPage(){
- const saved=bridgeConnection||{};
- root.innerHTML='<main class="login connection"><form class="login-card" id="connection-form"><span class="connection-kicker">АВИТОЛОГ</span><h1>Подключение</h1><p>Сохраните маршрут и строку доступа. Сервер проверит их, когда появится на связи.</p>'+field('Сервер','<select name="server" aria-label="Сервер"><option value="avitolog-bridge">Мост Авитолога</option></select>')+field('Адрес сервера','<input name="bridgeUrl" type="text" autocomplete="off" required placeholder="Адрес или имя сервера" value="'+esc(saved.bridgeUrl||'')+'">')+field('Строка подключения','<input name="accessKey" type="password" autocomplete="off" autocapitalize="none" spellcheck="false" required placeholder="Ключ моста" value="'+esc(saved.accessKey||'')+'">','Сохраняется только в браузере этого устройства.')+'<div id="form-error" aria-live="polite"></div><button class="btn primary">Сохранить подключение</button></form></main>';
+ const saved=mailboxConnection||{};
+ root.innerHTML='<main class="login connection"><form class="login-card" id="connection-form"><span class="connection-kicker">АВИТОЛОГ</span><h1>Подключение</h1><p>Подключите личную очередь. Объявления будут отправляться туда сразу после добавления.</p>'+field('Репозиторий','<input name="repo" autocomplete="off" autocapitalize="none" spellcheck="false" required placeholder="владелец/название" value="'+esc(saved.repo||'')+'">')+field('Секретный ключ','<input name="accessKey" type="password" autocomplete="off" autocapitalize="none" spellcheck="false" required value="'+esc(saved.accessKey||'')+'">','Сохраняется только в браузере этого устройства.')+'<div id="form-error" aria-live="polite"></div><button class="btn primary">Подключить</button></form></main>';
 }
-function normalBridgeUrl(value){
- const route=String(value||'').trim();
- if(!route)throw Error('Укажите адрес или имя сервера');
- return route.replace(/\/$/,'');
+function normalRepo(value){
+ const repo=String(value||'').trim().replace(/^https?:\/\/github\.com\//i,'').replace(/\/$/,'');
+ if(!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo))throw Error('Укажите репозиторий в формате владелец/название');
+ return repo;
 }
-async function connectBridge(form){
- const data=new FormData(form),bridgeUrl=normalBridgeUrl(data.get('bridgeUrl')),accessKey=String(data.get('accessKey')||'').trim();
- if(!accessKey)throw Error('Вставьте строку подключения');
- bridgeConnection={server:String(data.get('server')||'avitolog-bridge'),bridgeUrl,accessKey};
- localStorage.setItem(CONNECTION_KEY,JSON.stringify(bridgeConnection));
+async function connectMailbox(form){
+ const data=new FormData(form),repo=normalRepo(data.get('repo')),accessKey=String(data.get('accessKey')||'').trim();
+ if(!accessKey)throw Error('Введите секретный ключ');
+ const candidate={repo,accessKey},previous=mailboxConnection;mailboxConnection=candidate;
+ let response;
+ try{response=await mailboxRequest('inbox');}catch{mailboxConnection=previous;throw Error('Не удалось подключиться к очереди');}
+ if(!response.ok){mailboxConnection=previous;throw Error(response.status===401||response.status===403?'Секретный ключ не подходит':'Очередь недоступна. Проверьте репозиторий');}
+ localStorage.setItem(CONNECTION_KEY,JSON.stringify(candidate));
  unlocked=true;state=await readState();render();
 }
 function inlineError(message){const el=document.getElementById('form-error');if(el)el.innerHTML='<p class="inline-error">'+esc(message)+'</p>';else toast(message);}
@@ -173,7 +219,7 @@ root.addEventListener('submit',async e=>{
  e.preventDefault();const form=e.target;if(!form.checkValidity()){form.reportValidity();return;}
  const id=form.id,f=new FormData(form),submitter=e.submitter; if(submitter)submitter.disabled=true;
  try{
- if(id==='connection-form')await connectBridge(form);
+ if(id==='connection-form')await connectMailbox(form);
  else if(id==='item-form')await saveItem(form);
  else if(id==='price-form'){await updateItem({price:Number(f.get('price'))});render();toast('Цена сохранена');}
  else if(id==='comment-form'){
@@ -196,6 +242,7 @@ root.addEventListener('click',async e=>{
  const b=e.target.closest('[data-action]');if(!b||b.disabled)return;const action=b.dataset.action;
  try{
  if(action==='photo-add'){document.getElementById('photo-files').click();return;}
+ if(action==='refresh-results'){b.disabled=true;await readMailboxResults();return;}
  if(action==='photo-remove'){draft.photos.splice(Number(b.dataset.index),1);refreshPhotos();return;}
  if(action==='photo-main'){draft.photos.unshift(...draft.photos.splice(Number(b.dataset.index),1));refreshPhotos();return;}
  if(action==='cards-toggle'){draft.generateCards=b.checked;refreshCards();queueDraftSave();return;}
@@ -259,12 +306,8 @@ root.addEventListener('paste',async e=>{
 });
 root.addEventListener('input',e=>{if(e.target.hasAttribute('data-time-input')){const digits=e.target.value.replace(/\D/g,'').slice(0,4);e.target.value=digits.slice(0,2)+(digits.length>2?':'+digits.slice(2):'');}if(draft?.key==='new'&&e.target.closest('#item-form'))syncNewDraft();});
 window.addEventListener('hashchange',()=>{window.scrollTo(0,0);render();});
-window.avitologBridge=Object.freeze({
- receive:async event=>{if(!unlocked)throw Error('Сначала подключите сервер');await commit(s=>receiveEvent(s,event));render();return {ok:true,eventId:event.id};},
- export:()=>{if(!unlocked)throw Error('Сначала подключите сервер');return structuredClone(state);}
-});
 async function boot(){
- try{bridgeConnection=JSON.parse(localStorage.getItem(CONNECTION_KEY)||'null');unlocked=!!(bridgeConnection?.bridgeUrl&&bridgeConnection?.accessKey);if(unlocked){state=await readState();queueBridgeSync();}render();}
+ try{mailboxConnection=JSON.parse(localStorage.getItem(CONNECTION_KEY)||'null');unlocked=!!(mailboxConnection?.repo&&mailboxConnection?.accessKey);if(unlocked){state=await readState();queueMailboxSync();}render();}
  catch(e){root.innerHTML='<main class="login"><div class="login-card"><h1>Не удалось открыть хранилище</h1><p>'+esc(e.message)+'</p><p>Разрешите хранение данных для сайта и обновите страницу.</p></div></main>';}
 }
 boot();
