@@ -1,19 +1,19 @@
 
-export const VERSION = 4;
+export const VERSION = 5;
 export const todayKey = () => new Intl.DateTimeFormat('sv-SE', {timeZone:'Europe/Moscow',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
 export const uid = () => crypto.randomUUID();
 export const minutes = time => { if(!/^\d{2}:\d{2}$/.test(time||'')) return NaN; const [h,m]=time.split(':').map(Number); return h<24&&m<60?h*60+m:NaN; };
 export const toTime = n => String(Math.floor(n/60)).padStart(2,'0')+':'+String(n%60).padStart(2,'0');
-export const blankState = () => ({version:VERSION,items:[],slots:[],bookings:[],outbox:[],eventIds:[],newDraft:null});
+export const blankState = () => ({version:VERSION,items:[],slots:[],bookings:[],outbox:[],eventIds:[],newDraft:null,deletedMailboxItemIds:[]});
 export function normalItem(x) {
- if(!x.id || !['queue','ready','published','sold'].includes(x.status)) throw Error('Некорректное объявление');
+ if(!x.id || !['queue','ready','published','sold','archived'].includes(x.status)) throw Error('Некорректное объявление');
  const price=x.price==null||x.price===''?null:Number(x.price);
  if(price!==null&&(!Number.isFinite(price)||price<0)) throw Error('Укажите корректную цену');
  if((x.photos||[]).length>10) throw Error('Можно добавить не больше 10 фотографий');
  const productKind=x.productKind==='batch'?'batch':'single';
  const suppliedQuantity=productKind==='batch'?Number(x.quantity):null;
  const quantity=Number.isInteger(suppliedQuantity)&&suppliedQuantity>=1?suppliedQuantity:null;
- return {title:'Новое объявление',raw:'',description:'',photos:[],comments:[],price:null,fast:null,optimal:null,slow:null,pickupMinutes:60,delivery:false,stats:{views:0,favorites:0,contacts:0},offers:[],createdAt:new Date().toISOString(),productKind:'single',condition:'used',size:'',defects:'',quantity:null,generateCards:false,cardStyle:'realistic',...x,price,title:String(x.title||'Новое объявление').slice(0,50),productKind,condition:productKind==='single'?(x.condition==='new'?'new':'used'):null,size:String(x.size||'').slice(0,120),defects:String(x.defects||''),quantity,generateCards:!!x.generateCards,cardStyle:x.cardStyle==='studio'?'studio':'realistic'};
+ return {title:'Новое объявление',raw:'',description:'',photos:[],comments:[],chats:[],price:null,fast:null,optimal:null,slow:null,pickupMinutes:60,delivery:false,stats:{views:0,favorites:0,contacts:0},offers:[],createdAt:new Date().toISOString(),productKind:'single',condition:'used',size:'',defects:'',quantity:null,generateCards:false,cardStyle:'realistic',...x,price,title:String(x.title||'Новое объявление').slice(0,50),productKind,condition:productKind==='single'?(x.condition==='new'?'new':'used'):null,size:String(x.size||'').slice(0,120),defects:String(x.defects||''),quantity,generateCards:!!x.generateCards,cardStyle:x.cardStyle==='studio'?'studio':'realistic',chats:Array.isArray(x.chats)?x.chats:[]};
 }
 export function receiveEvent(state,event) {
  if(!event || !event.id || !event.type) throw Error('У события должны быть id и type');
@@ -30,6 +30,16 @@ export function receiveEvent(state,event) {
   const offer={status:'pending',method:'pickup',messageCount:1,createdAt:new Date().toISOString(),...p};
   const idx=item.offers.findIndex(o=>o.id===offer.id);
   if(idx<0)item.offers.unshift(offer);else item.offers[idx]=offer;
+ } else if(event.type==='chat.upsert'){
+  const item=s.items.find(x=>x.id===p?.itemId);
+  if(!item || !p.id) throw Error('Некорректная переписка');
+  const chat={messages:[],summary:'',updatedAt:new Date().toISOString(),...p};
+  const idx=item.chats.findIndex(c=>c.id===chat.id);
+  if(idx<0)item.chats.unshift(chat);else item.chats[idx]={...item.chats[idx],...chat};
+ } else if(event.type==='item.status'){
+  const item=s.items.find(x=>x.id===p?.itemId);
+  if(!item || !['queue','ready','published','sold','archived'].includes(p.status)) throw Error('Некорректный статус объявления');
+  item.status=p.status;
  } else throw Error('Неизвестное событие: '+event.type);
  s.eventIds.push(event.id);return s;
 }
@@ -57,7 +67,9 @@ export function addBooking(state,p){
  const s=structuredClone(state),duration=Number(item.pickupMinutes)||60;
  s.bookings.push({...p,id:uid(),date:slot.date,to:toTime(minutes(p.from)+duration),status:'scheduled',method:slot.kind});
  if(offer)s.items.find(x=>x.id===item.id).offers.find(o=>o.id===offer.id).status='accepted';
- s.outbox.push({id:uid(),type:'offer.accepted',payload:p,createdAt:new Date().toISOString()});return s;
+ const createdAt=new Date().toISOString();
+ s.outbox.push({id:uid(),type:'offer.accepted',payload:p,createdAt});
+ s.outbox.push({id:uid(),type:'calendar.booking.created',payload:{...s.bookings.at(-1)},createdAt});return s;
 }
 export function dayLoad(state,date){
  const slots=state.slots.filter(x=>x.date===date);
