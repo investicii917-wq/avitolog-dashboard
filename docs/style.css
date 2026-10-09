@@ -34,3 +34,4 @@ body{background:var(--bg);color:var(--ink)}.main-head,.page-head,.dock{backgroun
 .actions-stack .btn.action-link{justify-content:flex-start}.actions-stack .btn.delete-action{justify-content:center}
 .processing-status.archived{background:linear-gradient(135deg,#2b2c30,#17181b);border-color:#505157;color:#bdbab2}
 .archive-date{color:#878891;font-size:11px}
+.stats-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}.stats-grid>div{min-width:0;padding:12px;border:1px solid #46413a;border-radius:13px;background:linear-gradient(145deg,#1b1c21,#121317)}.stats-grid svg{width:18px;height:18px;color:#c5a66b;margin-bottom:8px}.stats-grid span{display:block;font-size:11px;color:var(--muted)}.stats-grid b{display:block;margin-top:3px;font-size:20px;color:#e4c47e}
