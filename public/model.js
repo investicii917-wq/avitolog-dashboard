@@ -34,6 +34,7 @@ export function receiveEvent(state,event) {
   const item=s.items.find(x=>x.id===p?.itemId);
   if(!item || !p.id) throw Error('Некорректная переписка');
   const chat={messages:[],summary:'',updatedAt:new Date().toISOString(),...p};
+  item.chats??=[];
   const idx=item.chats.findIndex(c=>c.id===chat.id);
   if(idx<0)item.chats.unshift(chat);else item.chats[idx]={...item.chats[idx],...chat};
  } else if(event.type==='item.status'){
