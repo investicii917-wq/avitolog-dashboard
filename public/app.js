@@ -1,9 +1,9 @@
 
-import {readState,saveState} from './data.js?v=6';
-import {uid,todayKey,normalItem,receiveEvent,addSlot,addBooking,freeTimes,dayLoad,minutes} from './model.js?v=9';
+import {readState,saveState} from './data.js?v=7';
+import {uid,todayKey,normalItem,receiveEvent,addSlot,addBooking,freeTimes,dayLoad,minutes} from './model.js?v=10';
 const root=document.getElementById('app');
 const CONNECTION_KEY='avitolog-mailbox-connection-v1';
-let state,unlocked=false,mailboxConnection=null,draft=null,galleryIndex=0,toastTimer,photoBusy=false,commitQueue=Promise.resolve(),mailboxSyncing=false,mailboxSyncTimer,mailboxResultSyncing=false,mailboxResultTimer;
+let state,unlocked=false,mailboxConnection=null,draft=null,galleryIndex=0,toastTimer,photoBusy=false,commitQueue=Promise.resolve(),mailboxSyncing=false,mailboxSyncTimer,mailboxResultSyncing=false,mailboxResultTimer,mailboxStateTimer,mailboxStateSyncing=false;
 const icons={
  back:'<path d="m15 5-7 7 7 7"/>',close:'<path d="m6 6 12 12M18 6 6 18"/>',
  plus:'<path d="M12 5v14M5 12h14"/>',calendar:'<rect x="3" y="5" width="18" height="16" rx="3"/><path d="M7 3v4m10-4v4M3 10h18m-13 5h.01M12 15h.01M17 15h.01"/>',
@@ -26,11 +26,15 @@ const stamp=d=>new Date(d).toLocaleString('ru-RU',{timeZone:'Europe/Moscow',day:
 const route=()=>{const [path,query='']=(location.hash.slice(1)||'/analytics').split('?');return {path,parts:path.split('/').filter(Boolean),params:new URLSearchParams(query)};};
 function go(path){if(location.hash==='#'+path)render();else location.hash=path;}
 function toast(message){clearTimeout(toastTimer);const el=document.getElementById('notifications');el.innerHTML='<div class="toast">'+esc(message)+'</div>';toastTimer=setTimeout(()=>el.innerHTML='',4200);}
-async function commit(transform){const job=commitQueue.then(async()=>{const next=await transform(structuredClone(state));await saveState(next);state=next;void syncMailbox();void syncMailboxResults();return state;});commitQueue=job.catch(()=>{});return job;}
+async function commit(transform){const job=commitQueue.then(async()=>{const next=await transform(structuredClone(state));await saveState(next);state=next;void syncMailbox();void syncMailboxResults();queueMailboxStateSync();return state;});commitQueue=job.catch(()=>{});return job;}
 function queueMailboxSync(delay=0){clearTimeout(mailboxSyncTimer);mailboxSyncTimer=setTimeout(()=>{void syncMailbox();},delay);}
 function queueMailboxResultSync(delay=0){clearTimeout(mailboxResultTimer);mailboxResultTimer=setTimeout(()=>{void syncMailboxResults();},delay);}
+function queueMailboxStateSync(delay=900){clearTimeout(mailboxStateTimer);mailboxStateTimer=setTimeout(()=>{void syncMailboxState();},delay);}
 const utcStamp=()=>{const d=new Date(),p=n=>String(n).padStart(2,'0');return d.getUTCFullYear()+p(d.getUTCMonth()+1)+p(d.getUTCDate())+p(d.getUTCHours())+p(d.getUTCMinutes())+p(d.getUTCSeconds());};
 const randomPart=()=>crypto.getRandomValues(new Uint32Array(1))[0].toString(36).padStart(7,'0');
+const mailboxEvent=(type,payload,markers={})=>({schema:'avitolog.mailbox.v1',id:uid(),type,createdAt:new Date().toISOString(),payload,markers:{origin:'site',...markers}});
+const addOutbox=(s,type,payload,markers={})=>{s.outbox.push(mailboxEvent(type,payload,markers));return s;};
+const listingMarkers=(record,action)=>({action,listingId:record.id,cards:{requested:!!record.generateCards,style:record.generateCards?record.cardStyle:null,count:record.generateCards?record.cardCount:0}});
 const textBase64=value=>{const bytes=new TextEncoder().encode(value);let binary='';for(const byte of bytes)binary+=String.fromCharCode(byte);return btoa(binary);};
 const dataUriBase64=value=>String(value||'').replace(/^data:[^;]+;base64,/,'');
 const mailboxPath=path=>'https://api.github.com/repos/'+mailboxConnection.repo.split('/').map(encodeURIComponent).join('/')+'/contents'+(path?'/'+path.split('/').map(encodeURIComponent).join('/'):'' );
@@ -43,14 +47,40 @@ function fileExtension(photo){const type=String(photo.type||'').toLowerCase();if
 function mailboxManifest(task,attachmentNames){
  const payload=structuredClone(task.payload||{}),photos=payload?.item?.photos;
  if(Array.isArray(photos))payload.item.photos=photos.map((photo,index)=>({id:photo.id,name:photo.name||('photo-'+(index+1)),type:photo.type||'image/jpeg',file:attachmentNames[index]||null}));
- return JSON.stringify({id:task.id,type:task.type,createdAt:task.createdAt,payload,attachments:attachmentNames},null,2);
+ return JSON.stringify({schema:'avitolog.mailbox.v1',id:task.id,type:task.type,createdAt:task.createdAt,payload,markers:task.markers||{},attachments:attachmentNames},null,2);
 }
 async function putMailboxFile(path,content,message){
  const response=await mailboxRequest(path,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({message,content})});
  if(!response.ok)throw Error('Не удалось передать данные в очередь');
 }
+function mailboxSnapshot(source){
+ const copy=structuredClone(source);
+ copy.outbox=[];copy.eventIds=[];copy.importedMailboxInbox=[];copy.processedMailboxResults=[];copy.newDraft=null;
+ copy.items=(copy.items||[]).map(x=>({...x,photos:(x.photos||[]).map(p=>({...p,src:null}))}));
+ return {schema:'avitolog.state.v1',savedAt:new Date().toISOString(),state:copy};
+}
+async function syncMailboxState(loadOnly=false){
+ if(mailboxStateSyncing||!state||!mailboxConnection?.repo||!mailboxConnection?.accessKey)return;
+ mailboxStateSyncing=true;
+ try{
+  const path='state/site-state.json',response=await mailboxRequest(path);
+  let remote=null,sha=null;
+  if(response.ok){const payload=await response.json();sha=payload.sha;try{remote=JSON.parse(base64Text(payload.content));}catch{}}
+  if(remote?.schema==='avitolog.state.v1'&&remote.state&&loadOnly){
+   const localOutbox=state.outbox||[],localDeleted=state.deletedMailboxItemIds||[];
+   const imported={importedMailboxInbox:state.importedMailboxInbox||[],processedMailboxResults:state.processedMailboxResults||[]};
+   state={...remote.state,...imported,outbox:localOutbox,deletedMailboxItemIds:[...new Set([...(remote.state.deletedMailboxItemIds||[]),...localDeleted])],version:state.version};
+   state.items=(state.items||[]).filter(x=>!state.deletedMailboxItemIds.includes(x.id));
+   await saveState(state);return;
+  }
+  if(loadOnly)return;
+  const body={message:'Update current Avitolog state',content:textBase64(JSON.stringify(mailboxSnapshot(state)))};if(sha)body.sha=sha;
+  const saved=await mailboxRequest(path,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  if(!saved.ok&&saved.status===409)queueMailboxStateSync(1600);
+ }catch{}finally{mailboxStateSyncing=false;}
+}
 async function sendMailboxEvent(task){
- const prefix=utcStamp()+'-'+randomPart(),photos=Array.isArray(task.payload?.item?.photos)?task.payload.item.photos:[],attachmentNames=[];
+ const prefix=utcStamp()+'-'+randomPart(),photos=['item.created','item.edited'].includes(task.type)&&Array.isArray(task.payload?.item?.photos)?task.payload.item.photos:[],attachmentNames=[];
  for(let index=0;index<photos.length;index++){
   const photo=photos[index],encoded=dataUriBase64(photo.src),extension=fileExtension(photo);
   if(!encoded)continue;
@@ -84,38 +114,54 @@ async function restoreMailboxPhotos(folder,photos){
  }
  return restored;
 }
-async function syncMailboxInbox(){
- const listResponse=await mailboxRequest('inbox');if(!listResponse.ok)return;
- const files=(await listResponse.json()).filter(file=>file.type==='file'&&/-text\.txt$/i.test(file.name)).sort((a,b)=>String(a.name).localeCompare(String(b.name)));
- for(const file of files){
-  if(state.importedMailboxInbox?.includes(file.sha))continue;
-  let event;try{event=await readMailboxJson('inbox',file);}catch{continue;}
-  if(event?.type==='item.deleted'&&event?.payload?.itemId){await commit(s=>{s.importedMailboxInbox??=[];s.deletedMailboxItemIds??=[];if(s.importedMailboxInbox.includes(file.sha))return s;s.items=s.items.filter(item=>item.id!==event.payload.itemId);s.deletedMailboxItemIds.push(event.payload.itemId);s.importedMailboxInbox.push(file.sha);return s;});continue;}
-  if(event?.type==='item.status'&&event?.payload?.itemId){await commit(s=>{s.importedMailboxInbox??=[];if(s.importedMailboxInbox.includes(file.sha))return s;const target=s.items.find(item=>item.id===event.payload.itemId);if(target&&['queue','ready','published','sold','archived'].includes(event.payload.status)){target.status=event.payload.status;if(event.payload.status==='archived')target.archivedAt=event.payload.archivedAt||new Date().toISOString();else delete target.archivedAt;}s.importedMailboxInbox.push(file.sha);return s;});continue;}
-  if(event?.type==='chat.upsert'&&event?.payload?.itemId){await commit(s=>{s.importedMailboxInbox??=[];if(s.importedMailboxInbox.includes(file.sha))return s;try{receiveEvent(s,event);}catch{}s.importedMailboxInbox.push(file.sha);return s;});continue;}
-  if(event?.type?.startsWith('calendar.')){await commit(s=>{s.importedMailboxInbox??=[];if(!s.importedMailboxInbox.includes(file.sha))s.importedMailboxInbox.push(file.sha);return s;});continue;}
-  const remote=event?.payload?.item||(event?.type==='item.upsert'?event.payload:null);if(!remote?.id)continue;
-  const photos=await restoreMailboxPhotos('inbox',remote.photos);
-  await commit(s=>{s.importedMailboxInbox??=[];if(s.importedMailboxInbox.includes(file.sha))return s;const index=s.items.findIndex(x=>x.id===remote.id),old=index>=0?s.items[index]:{};const next=normalItem({...old,...remote,photos,status:old.status==='ready'?'ready':(remote.status||'queue')});if(index>=0)s.items[index]=next;else s.items.unshift(next);s.importedMailboxInbox.push(file.sha);return s;});
- }
+function markMailboxFile(s,folder,sha){
+ const key=folder==='inbox'?'importedMailboxInbox':'processedMailboxResults';
+ s[key]??=[];if(!s[key].includes(sha))s[key].push(sha);
 }
+function mergeRemoteItem(s,source,photos){
+ if(!source?.id||s.deletedMailboxItemIds?.includes(source.id))return;
+ const index=s.items.findIndex(x=>x.id===source.id),old=index>=0?s.items[index]:{};
+ const next=normalItem({...old,...source,photos:photos?.length?photos:(source.photos||old.photos||[])});
+ if(index>=0)s.items[index]=next;else s.items.unshift(next);
+}
+function applyMailboxEvent(s,event,photos=[]){
+ const p=event?.payload||{},remote=p.item||(event?.type==='item.upsert'?p:null);
+ if(event?.type==='listing.ready'){
+  const source=event.item||remote||{id:event.itemId,status:'queue',photos:event.photos||[]};
+  if(!source.id||s.deletedMailboxItemIds?.includes(source.id))return;
+  mergeRemoteItem(s,{...source,...(event.listing||{}),id:event.itemId||source.id,status:'ready',processedAt:event.processedAt||new Date().toISOString()},photos);
+  return;
+ }
+ if(event?.type==='item.deleted'&&p.itemId){s.items=s.items.filter(x=>x.id!==p.itemId);s.deletedMailboxItemIds??=[];if(!s.deletedMailboxItemIds.includes(p.itemId))s.deletedMailboxItemIds.push(p.itemId);return;}
+ if(remote?.id){mergeRemoteItem(s,remote,photos);return;}
+ if(event?.type==='item.status'&&p.itemId){const x=s.items.find(v=>v.id===p.itemId);if(x&&['queue','ready','published','sold','archived'].includes(p.status)){x.status=p.status;if(p.status==='archived')x.archivedAt=p.archivedAt||new Date().toISOString();else delete x.archivedAt;}return;}
+ if(event?.type==='item.publish'&&p.itemId){const x=s.items.find(v=>v.id===p.itemId);if(x){x.status='published';delete x.archivedAt;}return;}
+ if(event?.type==='item.comment'&&p.itemId&&p.comment){const x=s.items.find(v=>v.id===p.itemId);if(x){x.comments??=[];const i=x.comments.findIndex(v=>v.id===p.comment.id);if(i<0)x.comments.push(p.comment);else x.comments[i]=p.comment;}return;}
+ if(event?.type==='offer.upsert'||event?.type==='chat.upsert'){try{receiveEvent(s,event);}catch{}return;}
+ if(event?.type==='calendar.slot.opened'&&p.slot?.id){if(!s.slots.some(x=>x.id===p.slot.id))s.slots.push(p.slot);return;}
+ if(event?.type==='calendar.slot.removed'&&p.slotId){s.slots=s.slots.filter(x=>x.id!==p.slotId);s.bookings=s.bookings.filter(x=>x.slotId!==p.slotId);return;}
+ if(event?.type==='calendar.booking.created'&&p.booking?.id){if(!s.bookings.some(x=>x.id===p.booking.id))s.bookings.push(p.booking);return;}
+ if(event?.type==='calendar.booking.cancelled'&&p.bookingId){const x=s.bookings.find(v=>v.id===p.bookingId);if(x)x.status='cancelled';return;}
+}
+async function importMailboxFolder(folder,processedKey){
+ const listResponse=await mailboxRequest(folder);if(!listResponse.ok)return false;
+ const files=(await listResponse.json()).filter(file=>file.type==='file'&&file.name!=='.gitkeep'&&(/-text\.txt$/i.test(file.name)||/\.(json|txt)$/i.test(file.name))).sort((a,b)=>String(a.name).localeCompare(String(b.name)));
+ for(const file of files){
+  if(state[processedKey]?.includes(file.sha))continue;
+  let event;try{event=await readMailboxJson(folder,file);}catch{continue;}
+  const remote=event?.payload?.item||(event?.type==='item.upsert'?event.payload:null)||(event?.type==='listing.ready'?(event.item||{photos:event.photos||[]}):null);
+  const photos=remote?.photos?await restoreMailboxPhotos(folder,remote.photos):[];
+  await commit(s=>{if(s[processedKey]?.includes(file.sha))return s;applyMailboxEvent(s,event,photos);markMailboxFile(s,folder,file.sha);return s;});
+  if(event?.type==='listing.ready'){toast('Объявление подготовлено к публикации');render();}
+ }
+ return true;
+}
+async function syncMailboxInbox(){return importMailboxFolder('inbox','importedMailboxInbox');}
 async function syncMailboxResults(){
  if(mailboxResultSyncing||!state||!mailboxConnection?.repo||!mailboxConnection?.accessKey)return;
  mailboxResultSyncing=true;
- try{
-  await syncMailboxInbox();
-  const listResponse=await mailboxRequest('outbox');if(!listResponse.ok)return;
-  const files=(await listResponse.json()).filter(file=>file.type==='file'&&file.name!=='.gitkeep'&&/\.(json|txt)$/i.test(file.name)).sort((a,b)=>String(a.name).localeCompare(String(b.name)));
-  for(const file of files){
-   if(state.processedMailboxResults?.includes(file.sha))continue;
-   const contentResponse=await mailboxRequest('outbox/'+file.name);if(!contentResponse.ok)continue;
-   let result;try{result=JSON.parse(base64Text((await contentResponse.json()).content));}catch{continue;}
-   if(result?.type!=='listing.ready'||!result.itemId||!result.listing||state.deletedMailboxItemIds?.includes(result.itemId))continue;
-   const source=result.item||{id:result.itemId,status:'queue',photos:result.photos||[]},photos=await restoreMailboxPhotos('outbox',source.photos?.length?source.photos:(result.photos||[]));
-   await commit(s=>{s.processedMailboxResults??=[];if(s.processedMailboxResults.includes(file.sha))return s;const index=s.items.findIndex(x=>x.id===result.itemId),old=index>=0?s.items[index]:{};const next=normalItem({...old,...source,...result.listing,id:result.itemId,photos:photos.length?photos:(old.photos||[]),status:'ready',processedAt:result.processedAt||new Date().toISOString()});if(index>=0)s.items[index]=next;else s.items.unshift(next);s.processedMailboxResults.push(file.sha);return s;});
-   toast('Объявление подготовлено к публикации');render();
-  }
- }catch{}finally{mailboxResultSyncing=false;queueMailboxResultSync(15000);}
+ try{await syncMailboxInbox();await importMailboxFolder('outbox','processedMailboxResults');}
+ catch{}finally{mailboxResultSyncing=false;queueMailboxResultSync(15000);}
 }
 const btn=(label,action,cls='')=>'<button type="button" class="btn '+cls+'" data-action="'+action+'">'+label+'</button>';
 const link=(label,href,cls='')=>'<a class="'+cls+'" '+(label===icon('back')?'aria-label="Назад" ':label===icon('close')?'aria-label="Закрыть" ':label===icon('next')?'aria-label="Вперёд" ':'')+'href="#'+esc(href)+'">'+label+'</a>';
@@ -159,9 +205,9 @@ function detailPage(x){
  const dock=x.status==='ready'?link(icon('edit')+'Редактировать','/item/'+x.id+'/edit','btn')+btn('Опубликовать','publish','primary'):x.status==='archived'?btn('Вернуть в публикацию','restore-item','primary'):'';
  return page(x.title,x.status==='published'||x.status==='sold'?'/list/published':'/list/ready',main+publicationStats+prices+actions+desc+raw+bottom,dock);
 }
-function getDraft(id){const key=id||'new',fresh={photos:[],title:'',raw:'',description:'',price:null,pickupMinutes:60,delivery:false,productKind:'single',condition:'used',defects:'',quantity:1,generateCards:false,cardStyle:'realistic'};if(!draft||draft.key!==key)draft={key,...(id?structuredClone(item(id)):structuredClone(state?.newDraft||fresh))};return draft;}
+function getDraft(id){const key=id||'new',fresh={photos:[],title:'',raw:'',description:'',price:null,pickupMinutes:60,delivery:false,productKind:'single',condition:'used',defects:'',quantity:1,generateCards:false,cardStyle:'realistic',cardCount:1};if(!draft||draft.key!==key)draft={key,...(id?structuredClone(item(id)):structuredClone(state?.newDraft||fresh))};return draft;}
 function productFields(d){const kind=d.productKind==='batch'?'batch':'single',condition=d.condition==='new'?'new':'used';return '<section class="section product-section"><h2>Параметры товара</h2><div class="segmented" role="radiogroup" aria-label="Тип товара"><label><input type="radio" name="productKind" value="single" '+(kind==='single'?'checked':'')+'><span>Товар 1</span></label><label><input type="radio" name="productKind" value="batch" '+(kind==='batch'?'checked':'')+'><span>Товар тиражный</span></label></div><div class="product-single '+(kind==='single'?'':'is-hidden')+'"><div class="field-label">Состояние</div><div class="segmented condition" role="radiogroup" aria-label="Состояние"><label><input type="radio" name="condition" value="used" '+(condition==='used'?'checked':'')+'><span>Б/у</span></label><label><input type="radio" name="condition" value="new" '+(condition==='new'?'checked':'')+'><span>Новое</span></label></div></div><div class="product-batch '+(kind==='batch'?'':'is-hidden')+'">'+field('Количество штук','<input name="quantity" type="number" min="1" step="1" inputmode="numeric" value="'+(Number(d.quantity)||1)+'">','Укажите, сколько одинаковых единиц есть в наличии.')+'</div>'+field('Дефекты и нюансы','<textarea name="defects" rows="3" placeholder="Если есть — опишите честно. Это попадёт в обработку объявления.">'+esc(d.defects||'')+'</textarea>')+'</section>';}
-function cardsHtml(d){const enabled=!!d.generateCards,style=d.cardStyle==='studio'?'studio':'realistic';return '<section class="section cards-section"><label class="switch-row card-switch"><span><b>Создать карточки</b><small>Подготовить задачу для генерации вариантов</small></span><input type="checkbox" name="generateCards" data-action="cards-toggle" '+(enabled?'checked':'')+'></label><div id="cards-config" class="cards-config '+(enabled?'':'is-hidden')+'"><div class="divider"></div><h2>Вариант карточек</h2><div class="card-style-options"><label class="card-style-option"><input type="radio" name="cardStyle" value="realistic" '+(style==='realistic'?'checked':'')+'><span><b>Реалистичные</b><small>Предмет в чистой домашней обстановке. Оригинальный товар сохраняется.</small></span></label><label class="card-style-option"><input type="radio" name="cardStyle" value="studio" '+(style==='studio'?'checked':'')+'><span><b>Студийные</b><small>Товарная карточка с аккуратной студийной подачей.</small></span></label></div></div></section>';}
+function cardsHtml(d){const enabled=!!d.generateCards,style=d.cardStyle==='studio'?'studio':'realistic',count=Math.max(1,Math.min(10,Number(d.cardCount)||1));return '<section class="section cards-section"><label class="switch-row card-switch"><span><b>Создать карточки</b><small>Передать обработчику задачу на подготовку вариантов</small></span><input type="checkbox" name="generateCards" data-action="cards-toggle" '+(enabled?'checked':'')+'></label><div id="cards-config" class="cards-config '+(enabled?'':'is-hidden')+'"><div class="divider"></div><h2>Вариант карточек</h2><div class="card-style-options"><label class="card-style-option"><input type="radio" name="cardStyle" value="realistic" '+(style==='realistic'?'checked':'')+'><span><b>Реалистичные</b><small>Предмет в чистой домашней обстановке. Оригинальный товар сохраняется.</small></span></label><label class="card-style-option"><input type="radio" name="cardStyle" value="studio" '+(style==='studio'?'checked':'')+'><span><b>Студийные</b><small>Товарная карточка с аккуратной студийной подачей.</small></span></label></div>'+field('Количество карточек','<input name="cardCount" type="number" min="1" max="10" step="1" inputmode="numeric" value="'+count+'">','В задачу обработчику будет передано '+count+' '+(count===1?'карточка':'карточек')+'.')+'</div></section>';}
 function photosHtml(d){
  return '<div class="photo-editor-head"><b>Фотографии</b><span class="meta">'+d.photos.length+' / 10</span></div><div class="photo-grid">'+d.photos.map((p,i)=>'<div class="photo-tile"><img src="'+esc(p.src)+'" alt="Фото '+(i+1)+'"><button type="button" class="remove" data-action="photo-remove" data-index="'+i+'" aria-label="Удалить фото '+(i+1)+'">'+icon('close')+'</button>'+(i===0?'<span class="photo-order">Главное</span>':'<button type="button" class="photo-main" data-action="photo-main" data-index="'+i+'">На обложку</button>')+'</div>').join('')+(d.photos.length<10?'<button type="button" class="photo-add" data-action="photo-add">'+icon('plus')+'Добавить фото</button>':'')+'</div><input class="file-input" id="photo-files" type="file" accept="image/*" multiple><p class="help" style="margin-top:10px">Оригиналы фото сохраняются без обработки. До 10 фотографий.</p>';
 }
@@ -247,7 +293,7 @@ async function connectMailbox(form){
  try{response=await mailboxRequest('inbox');}catch{mailboxConnection=previous;throw Error('Не удалось подключиться к очереди');}
  if(!response.ok){mailboxConnection=previous;throw Error(response.status===401||response.status===403?'Секретный ключ не подходит':'Очередь недоступна. Проверьте репозиторий');}
  localStorage.setItem(CONNECTION_KEY,JSON.stringify(candidate));
- unlocked=true;state=await readState();queueMailboxResultSync();render();
+ unlocked=true;state=await readState();await syncMailboxState(true);queueMailboxSync();queueMailboxResultSync();render();
 }
 function inlineError(message){const el=document.getElementById('form-error');if(el)el.innerHTML='<p class="inline-error">'+esc(message)+'</p>';else toast(message);}
 async function saveItem(form){
@@ -255,11 +301,11 @@ async function saveItem(form){
  const f=new FormData(form),isNew=draft.key==='new';
  const raw=String(f.get('raw')||'').trim(),productKind=f.get('productKind')==='batch'?'batch':'single';
  const quantity=productKind==='batch'?(Number(f.get('quantity'))||null):null;
- const data={...(isNew?{}:item(draft.id)),id:isNew?uid():draft.id,status:isNew?'queue':draft.status,title:isNew?(raw.split(/[\n.!?]/)[0]||'Новое объявление').slice(0,50):String(f.get('title')||'').trim(),raw,description:isNew?'':String(f.get('description')||''),photos:draft.photos,price:f.get('price')===''?null:Number(f.get('price')),pickupMinutes:isNew?60:Number(f.get('pickupMinutes')),delivery:!isNew&&f.has('delivery'),productKind,condition:productKind==='single'?(f.get('condition')==='new'?'new':'used'):null,defects:String(f.get('defects')||'').trim(),quantity,generateCards:f.has('generateCards'),cardStyle:f.get('cardStyle')==='studio'?'studio':'realistic'};
+ const data={...(isNew?{}:item(draft.id)),id:isNew?uid():draft.id,status:isNew?'queue':draft.status,title:isNew?(raw.split(/[\n.!?]/)[0]||'Новое объявление').slice(0,50):String(f.get('title')||'').trim(),raw,description:isNew?'':String(f.get('description')||''),photos:draft.photos,price:f.get('price')===''?null:Number(f.get('price')),pickupMinutes:isNew?60:Number(f.get('pickupMinutes')),delivery:!isNew&&f.has('delivery'),productKind,condition:productKind==='single'?(f.get('condition')==='new'?'new':'used'):null,defects:String(f.get('defects')||'').trim(),quantity,generateCards:f.has('generateCards'),cardStyle:f.get('cardStyle')==='studio'?'studio':'realistic',cardCount:Number(f.get('cardCount'))||1};
  if(data.pickupMinutes<15||data.pickupMinutes>480)throw Error('Укажите время получения от 15 до 480 минут');
  const event={id:uid(),type:'item.upsert',payload:normalItem(data)};
  if(isNew)clearTimeout(draftSaveTimer);
- await commit(s=>{const next=receiveEvent(s,event),now=new Date().toISOString();next.newDraft=null;next.outbox.push({id:uid(),type:isNew?'item.created':'item.edited',payload:{itemId:data.id,item:event.payload},createdAt:now});if(data.generateCards)next.outbox.push({id:uid(),type:'cards.requested',payload:{itemId:data.id,style:data.cardStyle,photoIds:data.photos.map(p=>p.id)},createdAt:now});return next;});
+ await commit(s=>{const next=receiveEvent(s,event),saved=next.items.find(x=>x.id===data.id),signature=saved.generateCards?[saved.cardStyle,saved.cardCount,...saved.photos.map(p=>p.id)].join(':'):null,previous=isNew?null:item(data.id)?.cardRequestKey;next.newDraft=null;if(signature!==previous){saved.cardRequestKey=signature;saved.cardRequestStatus=signature?'requested':null;}addOutbox(next,isNew?'item.created':'item.edited',{itemId:data.id,item:saved},listingMarkers(saved,isNew?'listing.create':'listing.update'));if(signature&&signature!==previous)addOutbox(next,'cards.requested',{itemId:data.id,item:saved,requestId:uid(),style:saved.cardStyle,count:saved.cardCount,photoIds:saved.photos.map(p=>p.id)},{action:'cards.generate',listingId:data.id,cards:{requested:true,style:saved.cardStyle,count:saved.cardCount}});return next;});
  draft=null;go(isNew?'/list/ready':'/item/'+data.id);toast(isNew?'Объявление добавлено':'Изменения сохранены');
 }
 root.addEventListener('submit',async e=>{
@@ -272,18 +318,18 @@ root.addEventListener('submit',async e=>{
  else if(id==='comment-form'){
  const text=String(f.get('text')||'').trim();if(!text)throw Error('Напишите комментарий');
  const itemId=route().parts[1];
- await commit(s=>{const comment={id:uid(),text,createdAt:new Date().toISOString()};s.items.find(x=>x.id===itemId).comments.push(comment);s.outbox.push({id:uid(),type:'item.comment',payload:{itemId,...comment},createdAt:comment.createdAt});return s;});
+ await commit(s=>{const comment={id:uid(),text,createdAt:new Date().toISOString()};const record=s.items.find(x=>x.id===itemId);record.comments.push(comment);addOutbox(s,'item.comment',{itemId,comment,item:record},{action:'listing.comment',listingId:itemId});return s;});
  render();toast('Комментарий сохранён для обработки');
  }else if(id==='slot-form'){
- const p={...Object.fromEntries(f),id:uid(),kind:'pickup'},now=new Date().toISOString();await commit(s=>{const next=addSlot(s,p);next.outbox.push({id:uid(),type:'calendar.slot.opened',payload:p,createdAt:now});return next;});go('/calendar?month='+p.date.slice(0,7)+'&day='+p.date);toast('Время открыто');
+ const p={...Object.fromEntries(f),id:uid(),kind:'pickup'};await commit(s=>{const next=addSlot(s,p);addOutbox(next,'calendar.slot.opened',{slot:next.slots.find(x=>x.id===p.id)},{action:'calendar.slot.open',slotId:p.id});return next;});go('/calendar?month='+p.date.slice(0,7)+'&day='+p.date);toast('Время открыто');
  }else if(id==='booking-form'){
  const x=item(f.get('itemId')),o=x.offers.find(v=>v.id===f.get('offerId')),p={...Object.fromEntries(f),buyer:o.buyer,price:o.price};
- await commit(s=>addBooking(s,p));go('/slot/'+p.slotId);toast('Встреча сохранена');
+ await commit(s=>{const next=addBooking(s,p),booking=next.bookings.at(-1);addOutbox(next,'calendar.booking.created',{booking,item:next.items.find(v=>v.id===booking.itemId)},{action:'calendar.booking.create',bookingId:booking.id,listingId:booking.itemId});return next;});go('/slot/'+p.slotId);toast('Встреча сохранена');
  }
  }catch(err){inlineError(err.message);}finally{if(submitter?.isConnected)submitter.disabled=false;}
 });
 async function updateItem(patch){
- const id=route().parts[1];await commit(s=>{const idx=s.items.findIndex(x=>x.id===id);s.items[idx]=normalItem({...s.items[idx],...patch});s.outbox.push({id:uid(),type:'item.edited',payload:{itemId:id,...patch},createdAt:new Date().toISOString()});return s;});
+ const id=route().parts[1];await commit(s=>{const idx=s.items.findIndex(x=>x.id===id);s.items[idx]=normalItem({...s.items[idx],...patch});addOutbox(s,'item.edited',{itemId:id,item:s.items[idx],changes:patch},listingMarkers(s.items[idx],'listing.update'));return s;});
 }
 root.addEventListener('click',async e=>{
  const b=e.target.closest('[data-action]');if(!b||b.disabled)return;const action=b.dataset.action;
@@ -301,17 +347,17 @@ root.addEventListener('click',async e=>{
  else if(action==='set-price'){await updateItem({price:Number(b.dataset.price)});render();}
  else if(action==='publish'){
  const x=item(route().parts[1]);if(!x.price||!x.title)throw Error('Укажите заголовок и цену перед публикацией');
- await commit(s=>{const a=s.items.find(i=>i.id===x.id);a.status='published';s.outbox.push({id:uid(),type:'item.publish',payload:{itemId:x.id},createdAt:new Date().toISOString()});return s;});
+  await commit(s=>{const a=s.items.find(i=>i.id===x.id);a.status='published';delete a.archivedAt;addOutbox(s,'item.publish',{itemId:x.id,item:a},listingMarkers(a,'listing.publish'));return s;});
  go('/item/'+x.id);toast('Перемещено в «Публик.»');
  }else if(action==='archive-item'||action==='restore-item'){
   const x=item(route().parts[1]);if(!x)return;
   const status=action==='archive-item'?'archived':'published';
-  await commit(s=>{const value=s.items.find(i=>i.id===x.id);value.status=status;if(status==='archived')value.archivedAt=new Date().toISOString();else delete value.archivedAt;s.outbox.push({id:uid(),type:'item.status',payload:{itemId:x.id,status,archivedAt:value.archivedAt||null},createdAt:new Date().toISOString()});return s;});
+   await commit(s=>{const value=s.items.find(i=>i.id===x.id);value.status=status;if(status==='archived')value.archivedAt=new Date().toISOString();else delete value.archivedAt;addOutbox(s,'item.status',{itemId:x.id,item:value,status,archivedAt:value.archivedAt||null},listingMarkers(value,status==='archived'?'listing.archive':'listing.restore'));return s;});
   go(status==='archived'?'/list/ready':'/item/'+x.id);toast(status==='archived'?'Объявление перенесено в «Готовые» с пометкой «Архив»':'Объявление возвращено в опубликованные');
  }else if(action==='delete-item'){
   const id=route().parts[1],x=item(id);if(!x)return;
   if(!window.confirm('Are you sure? Точно хотите удалить это объявление?'))return;
-  await commit(s=>{s.items=s.items.filter(value=>value.id!==id);s.deletedMailboxItemIds??=[];if(!s.deletedMailboxItemIds.includes(id))s.deletedMailboxItemIds.push(id);s.outbox.push({id:uid(),type:'item.deleted',payload:{itemId:id},createdAt:new Date().toISOString()});return s;});
+   await commit(s=>{s.items=s.items.filter(value=>value.id!==id);s.deletedMailboxItemIds??=[];if(!s.deletedMailboxItemIds.includes(id))s.deletedMailboxItemIds.push(id);addOutbox(s,'item.deleted',{itemId:id},{action:'listing.delete',listingId:id});return s;});
   go('/list/ready');toast('Объявление удалено');
  }else if(action==='day-select'){
  const date=b.dataset.date;
@@ -319,10 +365,10 @@ root.addEventListener('click',async e=>{
  render();requestAnimationFrame(()=>document.getElementById('day-panel')?.scrollIntoView({behavior:'smooth',block:'start'}));
  }else if(action==='remove-slot'){
  const id=b.dataset.id,s=state.slots.find(x=>x.id===id);
- await commit(v=>{if(v.bookings.some(x=>x.slotId===id&&x.status!=='cancelled'))throw Error('Сначала отмените назначенные встречи');v.slots=v.slots.filter(x=>x.id!==id);v.outbox.push({id:uid(),type:'calendar.slot.removed',payload:{slotId:id},createdAt:new Date().toISOString()});return v;});
+  await commit(v=>{if(v.bookings.some(x=>x.slotId===id&&x.status!=='cancelled'))throw Error('Сначала отмените назначенные встречи');v.slots=v.slots.filter(x=>x.id!==id);addOutbox(v,'calendar.slot.removed',{slotId:id},{action:'calendar.slot.remove',slotId:id});return v;});
  go('/calendar?month='+s.date.slice(0,7)+'&day='+s.date);
  }else if(action==='cancel-booking'){
- await commit(s=>{const booking=s.bookings.find(x=>x.id===b.dataset.id);booking.status='cancelled';const o=s.items.find(x=>x.id===booking.itemId)?.offers.find(x=>x.id===booking.offerId);if(o)o.status='pending';s.outbox.push({id:uid(),type:'calendar.booking.cancelled',payload:{bookingId:booking.id},createdAt:new Date().toISOString()});return s;});render();toast('Встреча отменена, время освобождено');
+ await commit(s=>{const booking=s.bookings.find(x=>x.id===b.dataset.id);booking.status='cancelled';const o=s.items.find(x=>x.id===booking.itemId)?.offers.find(x=>x.id===booking.offerId);if(o)o.status='pending';addOutbox(s,'calendar.booking.cancelled',{bookingId:booking.id,booking},{action:'calendar.booking.cancel',bookingId:booking.id});return s;});render();toast('Встреча отменена, время освобождено');
  }
  }catch(err){toast(err.message);}finally{if(b.isConnected)b.disabled=false;}
 });
@@ -330,7 +376,7 @@ function refreshPhotos(){const el=document.getElementById('photo-editor');if(el)
 function refreshCards(){const el=document.getElementById('cards-config');if(!el||!draft)return;const temp=document.createElement('div');temp.innerHTML=cardsHtml(draft);const next=temp.querySelector('#cards-config');if(next)el.replaceWith(next);}
 function syncProductFields(){const kind=document.querySelector('input[name=productKind]:checked')?.value||'single';document.querySelector('.product-single')?.classList.toggle('is-hidden',kind!=='single');document.querySelector('.product-batch')?.classList.toggle('is-hidden',kind!=='batch');}
 let draftSaveTimer;
-function syncNewDraft(){const form=document.getElementById('item-form');if(!form||draft?.key!=='new')return;const f=new FormData(form);draft.raw=String(f.get('raw')||'');draft.price=f.get('price')===''?null:Number(f.get('price'));draft.productKind=f.get('productKind')==='batch'?'batch':'single';draft.condition=f.get('condition')==='new'?'new':'used';draft.quantity=Number(f.get('quantity'))||1;draft.defects=String(f.get('defects')||'');draft.generateCards=f.has('generateCards');draft.cardStyle=f.get('cardStyle')==='studio'?'studio':'realistic';queueDraftSave();}
+function syncNewDraft(){const form=document.getElementById('item-form');if(!form||draft?.key!=='new')return;const f=new FormData(form);draft.raw=String(f.get('raw')||'');draft.price=f.get('price')===''?null:Number(f.get('price'));draft.productKind=f.get('productKind')==='batch'?'batch':'single';draft.condition=f.get('condition')==='new'?'new':'used';draft.quantity=Number(f.get('quantity'))||1;draft.defects=String(f.get('defects')||'');draft.generateCards=f.has('generateCards');draft.cardStyle=f.get('cardStyle')==='studio'?'studio':'realistic';draft.cardCount=Math.max(1,Math.min(10,Number(f.get('cardCount'))||1));queueDraftSave();}
 function queueDraftSave(){if(draft?.key!=='new')return;const snapshot=structuredClone(draft);clearTimeout(draftSaveTimer);draftSaveTimer=setTimeout(()=>{commit(s=>{s.newDraft=snapshot;return s;}).catch(()=>toast('Не удалось сохранить черновик'));},180);}
 function fileData(file){return new Promise((resolve,reject)=>{const r=new FileReader();r.onload=()=>resolve(r.result);r.onerror=()=>reject(Error('Не удалось прочитать фото '+file.name));r.readAsDataURL(file);});}
 
@@ -351,6 +397,7 @@ root.addEventListener('change',async e=>{
  const input=e.target;
  if(input.name==='productKind'){if(draft)draft.productKind=input.value==='batch'?'batch':'single';syncProductFields();syncNewDraft();return;}
  if(input.name==='cardStyle'&&draft){draft.cardStyle=input.value==='studio'?'studio':'realistic';refreshCards();queueDraftSave();return;}
+ if(input.name==='cardCount'&&draft){draft.cardCount=Math.max(1,Math.min(10,Number(input.value)||1));refreshCards();queueDraftSave();return;}
  if(draft?.key==='new'&&input.closest('#item-form'))syncNewDraft();
  if(input.id==='booking-slot'){const r=route();go('/item/'+r.parts[1]+'/book/'+r.parts[3]+'?slot='+input.value);return;}
  if(input.id==='photo-files')await ingestPhotos(Array.from(input.files||[]),input);
@@ -363,7 +410,7 @@ root.addEventListener('paste',async e=>{
 root.addEventListener('input',e=>{if(e.target.hasAttribute('data-time-input')){const digits=e.target.value.replace(/\D/g,'').slice(0,4);e.target.value=digits.slice(0,2)+(digits.length>2?':'+digits.slice(2):'');}if(draft?.key==='new'&&e.target.closest('#item-form'))syncNewDraft();});
 window.addEventListener('hashchange',()=>{window.scrollTo(0,0);render();});
 async function boot(){
- try{mailboxConnection=JSON.parse(localStorage.getItem(CONNECTION_KEY)||'null');unlocked=!!(mailboxConnection?.repo&&mailboxConnection?.accessKey);if(unlocked){state=await readState();queueMailboxSync();queueMailboxResultSync();}render();}
+ try{mailboxConnection=JSON.parse(localStorage.getItem(CONNECTION_KEY)||'null');unlocked=!!(mailboxConnection?.repo&&mailboxConnection?.accessKey);if(unlocked){state=await readState();await syncMailboxState(true);queueMailboxSync();queueMailboxResultSync();}render();}
  catch(e){root.innerHTML='<main class="login"><div class="login-card"><h1>Не удалось открыть хранилище</h1><p>'+esc(e.message)+'</p><p>Разрешите хранение данных для сайта и обновите страницу.</p></div></main>';}
 }
 boot();

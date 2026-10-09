@@ -4,7 +4,7 @@ export const todayKey = () => new Intl.DateTimeFormat('sv-SE', {timeZone:'Europe
 export const uid = () => crypto.randomUUID();
 export const minutes = time => { if(!/^\d{2}:\d{2}$/.test(time||'')) return NaN; const [h,m]=time.split(':').map(Number); return h<24&&m<60?h*60+m:NaN; };
 export const toTime = n => String(Math.floor(n/60)).padStart(2,'0')+':'+String(n%60).padStart(2,'0');
-export const blankState = () => ({version:VERSION,items:[],slots:[],bookings:[],outbox:[],eventIds:[],newDraft:null,deletedMailboxItemIds:[]});
+export const blankState = () => ({version:VERSION,items:[],slots:[],bookings:[],outbox:[],eventIds:[],newDraft:null,deletedMailboxItemIds:[],importedMailboxInbox:[],processedMailboxResults:[]});
 export function normalItem(x) {
  if(!x.id || !['queue','ready','published','sold','archived'].includes(x.status)) throw Error('Некорректное объявление');
  const price=x.price==null||x.price===''?null:Number(x.price);
@@ -13,7 +13,9 @@ export function normalItem(x) {
  const productKind=x.productKind==='batch'?'batch':'single';
  const suppliedQuantity=productKind==='batch'?Number(x.quantity):null;
  const quantity=Number.isInteger(suppliedQuantity)&&suppliedQuantity>=1?suppliedQuantity:null;
- return {title:'Новое объявление',raw:'',description:'',photos:[],comments:[],chats:[],price:null,fast:null,optimal:null,slow:null,pickupMinutes:60,delivery:false,stats:{views:0,favorites:0,contacts:0},offers:[],createdAt:new Date().toISOString(),productKind:'single',condition:'used',size:'',defects:'',quantity:null,generateCards:false,cardStyle:'realistic',...x,price,title:String(x.title||'Новое объявление').slice(0,50),productKind,condition:productKind==='single'?(x.condition==='new'?'new':'used'):null,size:String(x.size||'').slice(0,120),defects:String(x.defects||''),quantity,generateCards:!!x.generateCards,cardStyle:x.cardStyle==='studio'?'studio':'realistic',chats:Array.isArray(x.chats)?x.chats:[]};
+ const suppliedCardCount=Number(x.cardCount);
+ const cardCount=Number.isInteger(suppliedCardCount)&&suppliedCardCount>=1&&suppliedCardCount<=10?suppliedCardCount:1;
+ return {title:'Новое объявление',raw:'',description:'',photos:[],comments:[],chats:[],price:null,fast:null,optimal:null,slow:null,pickupMinutes:60,delivery:false,stats:{views:0,favorites:0,contacts:0},offers:[],createdAt:new Date().toISOString(),productKind:'single',condition:'used',size:'',defects:'',quantity:null,generateCards:false,cardStyle:'realistic',cardCount:1,cardRequestKey:null,cardRequestStatus:null,...x,price,title:String(x.title||'Новое объявление').slice(0,50),productKind,condition:productKind==='single'?(x.condition==='new'?'new':'used'):null,size:String(x.size||'').slice(0,120),defects:String(x.defects||''),quantity,generateCards:!!x.generateCards,cardStyle:x.cardStyle==='studio'?'studio':'realistic',cardCount,chats:Array.isArray(x.chats)?x.chats:[],comments:Array.isArray(x.comments)?x.comments:[]};
 }
 export function receiveEvent(state,event) {
  if(!event || !event.id || !event.type) throw Error('У события должны быть id и type');
@@ -41,6 +43,7 @@ export function receiveEvent(state,event) {
   const item=s.items.find(x=>x.id===p?.itemId);
   if(!item || !['queue','ready','published','sold','archived'].includes(p.status)) throw Error('Некорректный статус объявления');
   item.status=p.status;
+  if(p.status==='archived')item.archivedAt=p.archivedAt||item.archivedAt||new Date().toISOString();else delete item.archivedAt;
  } else throw Error('Неизвестное событие: '+event.type);
  s.eventIds.push(event.id);return s;
 }
@@ -68,9 +71,7 @@ export function addBooking(state,p){
  const s=structuredClone(state),duration=Number(item.pickupMinutes)||60;
  s.bookings.push({...p,id:uid(),date:slot.date,to:toTime(minutes(p.from)+duration),status:'scheduled',method:slot.kind});
  if(offer)s.items.find(x=>x.id===item.id).offers.find(o=>o.id===offer.id).status='accepted';
- const createdAt=new Date().toISOString();
- s.outbox.push({id:uid(),type:'offer.accepted',payload:p,createdAt});
- s.outbox.push({id:uid(),type:'calendar.booking.created',payload:{...s.bookings.at(-1)},createdAt});return s;
+ return s;
 }
 export function dayLoad(state,date){
  const slots=state.slots.filter(x=>x.date===date);
