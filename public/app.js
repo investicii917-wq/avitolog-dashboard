@@ -3,7 +3,7 @@ import {readState,saveState} from './data.js?v=7';
 import {uid,todayKey,normalItem,receiveEvent,addSlot,addBooking,freeTimes,dayLoad,minutes} from './model.js?v=11';
 const root=document.getElementById('app');
 const CONNECTION_KEY='avitolog-mailbox-connection-v1';
-let state,unlocked=false,mailboxConnection=null,draft=null,galleryIndex=0,toastTimer,photoBusy=false,commitQueue=Promise.resolve(),mailboxSyncing=false,mailboxSyncTimer,mailboxResultSyncing=false,mailboxResultTimer,mailboxStateTimer,mailboxStateSyncing=false;
+let state,unlocked=false,mailboxConnection=null,draft=null,galleryIndex=0,toastTimer,photoBusy=false,commitQueue=Promise.resolve(),mailboxSyncing=false,mailboxSyncTimer,mailboxResultSyncing=false,mailboxResultTimer,mailboxStateTimer,mailboxStateSyncing=false,calendarReturnPath='/analytics';
 const SITE_REFRESH_INTERVAL=5*60*1000,PROCESSED_FILE_LIMIT=1500;
 const icons={
  back:'<path d="m15 5-7 7 7 7"/>',close:'<path d="m6 6 12 12M18 6 6 18"/>',
@@ -194,7 +194,7 @@ function field(label,control,help=''){return '<label class="field">'+label+contr
 function header(tab){
  const readyCount=state.items.filter(x=>x.status==='queue'||x.status==='ready'||x.status==='archived').length,publishedCount=state.items.filter(x=>x.status==='published').length,offerCount=state.items.reduce((n,x)=>n+(x.offers||[]).filter(o=>o.status==='pending').length,0);
  const tabs=[['analytics','Аналитика','Аналит.','/analytics',offerCount],['ready','Готовые','Готовые','/list/ready',readyCount],['published','Публик.','Публик.','/list/published',publishedCount]];
- return '<header class="main-head">'+link(icon('calendar')+'Календарь','/calendar','calendar-link '+(tab==='calendar'?'active':''))+'<nav class="tabs" aria-label="Разделы">'+tabs.map(([key,label,short,href,count])=>link('<span class="long-label">'+label+'</span><span class="short-label">'+short+'</span><span class="count">'+count+'</span>',href,'tab '+(tab===key?'active':''))).join('')+'</nav></header>';}
+ return '<header class="main-head"><a class="calendar-link '+(tab==='calendar'?'active':'')+'" data-action="calendar-toggle" href="#/calendar">'+icon('calendar')+'Календарь</a><nav class="tabs" aria-label="Разделы">'+tabs.map(([key,label,short,href,count])=>link('<span class="long-label">'+label+'</span><span class="short-label">'+short+'</span><span class="count">'+count+'</span>',href,'tab '+(tab===key?'active':''))).join('')+'</nav></header>';}
 function statusIndicator(x){const status=typeof x==='string'?x:x.status,labels={ready:'Готово к публикации',queue:'В обработке',archived:'Архив'},date=status==='archived'&&x.archivedAt?'<span class="archive-date">с '+shortDate(x.archivedAt.slice(0,10))+'</span>':'';return '<span class="processing-status '+(status==='ready'?'ready':status==='archived'?'archived':'processing')+'">'+labels[status]+'</span>'+date;}
 function analyticsPage(){
  const demoStats={views:55,favorites:13,messages:3,offers:2,contacts:3};
@@ -208,8 +208,11 @@ function analyticsPage(){
  let progress=0;
  const segments=total?data.map(row=>{const from=progress,share=Math.round(row.value/total*100);progress+=share;return row.color+' '+from+'% '+progress+'%';}).join(', '):'#2a2b30 0 100%';
  const chart=data.length?'<section class="interest-card"><h1>Интерес к объявлениям</h1><div class="interest-ring" style="background:conic-gradient('+segments+')"><div><b>'+total+'</b><span>'+plural(total,'интерес','интереса','интересов')+'</span></div></div><div class="interest-legend">'+data.map(row=>{const percent=total?Math.round(row.value/total*100):0;return '<div class="interest-row"><i style="background:'+row.color+'"></i><span>'+esc(row.item.title)+'</span><b>'+percent+'%</b></div>';}).join('')+'</div></section>':'';
+ const selected=records[0],selectedStats=selected?.stats||{},views=Number(selectedStats.views)||0,favorites=Number(selectedStats.favorites)||0,written=Number(selectedStats.messages??selectedStats.contacts??(selected?.chats||[]).length)||0,activityBase=Math.max(views,1);
+ const boundedWidth=value=>Math.max(0,Math.min(100,Math.round(Number(value||0)/activityBase*100)));
+ const activity=selected?section('<h2>Отклик на объявление</h2><p>'+esc(selected.title)+'</p><div class="funnel-bars compact-bars">'+[['Просмотрели',views,'views'],['Добавили в избранное',favorites,'favorites'],['Написали',written,'messages']].map(([label,value,key])=>'<div class="funnel-step step-'+key+'"><div><span>'+label+'</span><b>'+value+'</b></div><i style="width:'+boundedWidth(value)+'%"></i></div>').join('')+'</div>','interest-card funnel-card'):'';
  const empty=section('<h1>Интерес к объявлениям</h1><p>После первой публикации здесь появятся обращения покупателей.</p>','interest-card');
- return header('analytics')+'<main class="container analytics"><section class="analytics-top">'+link(icon('comment')+'Смотреть предложения','/offers','btn accent block')+'</section>'+(chart||empty)+'</main>';
+ return header('analytics')+'<main class="container analytics"><section class="analytics-top">'+link(icon('comment')+'Смотреть предложения','/offers','btn accent block')+'</section>'+(chart||empty)+activity+'</main>';
 }
 function allOffersPage(){
  const offers=state.items.flatMap(x=>(x.offers||[]).filter(o=>o.status==='pending').map(o=>({item:x,offer:o}))).sort((a,b)=>String(b.offer.createdAt).localeCompare(String(a.offer.createdAt)));
@@ -366,6 +369,12 @@ async function updateItem(patch){
 root.addEventListener('click',async e=>{
  const b=e.target.closest('[data-action]');if(!b||b.disabled)return;const action=b.dataset.action;
  try{
+ if(action==='calendar-toggle'){
+  e.preventDefault();
+  if(route().path==='/calendar')go(calendarReturnPath||'/analytics');
+  else {calendarReturnPath=location.hash.slice(1)||'/analytics';go('/calendar');}
+  return;
+ }
  if(action==='photo-add'){document.getElementById('photo-files').click();return;}
  if(action==='photo-remove'){draft.photos.splice(Number(b.dataset.index),1);refreshPhotos();return;}
  if(action==='photo-main'){draft.photos.unshift(...draft.photos.splice(Number(b.dataset.index),1));refreshPhotos();return;}
