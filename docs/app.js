@@ -57,7 +57,7 @@ async function putMailboxFile(path,content,message){
 function mailboxSnapshot(source){
  const copy=structuredClone(source);
  copy.outbox=[];copy.eventIds=[];copy.importedMailboxInbox=[];copy.processedMailboxResults=[];copy.newDraft=null;
- copy.items=(copy.items||[]).map(x=>({...x,photos:(x.photos||[]).map(p=>({...p,src:null,preview:p.preview||null}))}));
+ copy.items=(copy.items||[]).map(x=>({...x,photos:(x.photos||[]).map(p=>({...p,src:null,preview:p.preview||p.src||null}))}));
  return {schema:'avitolog.state.v1',savedAt:new Date().toISOString(),state:copy};
 }
 async function syncMailboxState(loadOnly=false){
