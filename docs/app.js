@@ -37,20 +37,6 @@ const randomPart=()=>crypto.getRandomValues(new Uint32Array(1))[0].toString(36).
 const mailboxEvent=(type,payload,markers={})=>({schema:'avitolog.mailbox.v1',id:uid(),type,createdAt:new Date().toISOString(),payload,markers:{origin:'site',...markers}});
 const addOutbox=(s,type,payload,markers={})=>{s.outbox.push(mailboxEvent(type,payload,markers));return s;};
 const listingMarkers=(record,action)=>({action,listingId:record.id,cards:{requested:!!record.generateCards,style:record.generateCards?record.cardStyle:null,count:record.generateCards?record.cardCount:0}});
-function addShowcaseData(source){
- const next=structuredClone(source),updatedAt='2026-10-10T18:00:00.000Z';let changed=false;
- if(!next.items.some(x=>x.id==='showcase-keyboard-2000')){
-  next.items.unshift(normalItem({id:'showcase-keyboard-2000',showcase:true,status:'published',title:'Клавиатура',raw:'Демонстрационное опубликованное объявление.',description:'Клавиатура. Данные добавлены для отображения аналитики.',price:2000,pickupMinutes:60,delivery:false,createdAt:updatedAt,updatedAt,stats:{views:96,favorites:21,contacts:2,messages:2,offers:1},chats:[{id:'showcase-keyboard-chat-1',buyer:'Покупатель',summary:'Интересуется клавиатурой.',messages:[],updatedAt},{id:'showcase-keyboard-chat-2',buyer:'Покупатель',summary:'Готов забрать сейчас.',messages:[],updatedAt}],offers:[{id:'showcase-keyboard-offer-1700',buyer:'Покупатель',price:1700,status:'pending',method:'pickup',messageCount:1,note:'Готов забрать сейчас за 1 700 ₽.',createdAt:updatedAt}]}));
-  changed=true;
- }
- const cards=next.items.find(x=>/игральн.*(карт|колод)/i.test(x.title||''));
- if(cards){
-  const stats=cards.stats||{};
-  if(!Number(stats.views)&&!Number(stats.favorites)&&!Number(stats.contacts)&&!Number(stats.messages)){cards.stats={...stats,views:55,favorites:13,contacts:3,messages:3,offers:2};cards.updatedAt=updatedAt;changed=true;}
-  if(!cards.offers?.some(x=>x.id==='showcase-cards-offer-40')){cards.offers??=[];cards.offers.unshift({id:'showcase-cards-offer-40',buyer:'Покупатель',price:40,status:'pending',method:'pickup',messageCount:1,note:'Готов забрать сейчас за 40 ₽.',createdAt:updatedAt});cards.updatedAt=updatedAt;changed=true;}
- }
- return {state:next,changed};
-}
 const textBase64=value=>{const bytes=new TextEncoder().encode(value);let binary='';for(const byte of bytes)binary+=String.fromCharCode(byte);return btoa(binary);};
 const dataUriBase64=value=>String(value||'').replace(/^data:[^;]+;base64,/,'');
 const mailboxPath=path=>'https://api.github.com/repos/'+mailboxConnection.repo.split('/').map(encodeURIComponent).join('/')+'/contents'+(path?'/'+path.split('/').map(encodeURIComponent).join('/'):'' );
@@ -211,13 +197,10 @@ function header(tab){
  return '<header class="main-head"><a class="calendar-link '+(tab==='calendar'?'active':'')+'" data-action="calendar-toggle" href="#/calendar">'+icon('calendar')+'Календарь</a><nav class="tabs" aria-label="Разделы">'+tabs.map(([key,label,short,href,count])=>link('<span class="long-label">'+label+'</span><span class="short-label">'+short+'</span><span class="count">'+count+'</span>',href,'tab '+(tab===key?'active':''))).join('')+'</nav></header>';}
 function statusIndicator(x){const status=typeof x==='string'?x:x.status,labels={ready:'Готово к публикации',queue:'В обработке',archived:'Архив'},date=status==='archived'&&x.archivedAt?'<span class="archive-date">с '+shortDate(x.archivedAt.slice(0,10))+'</span>':'';return '<span class="processing-status '+(status==='ready'?'ready':status==='archived'?'archived':'processing')+'">'+labels[status]+'</span>'+date;}
 function analyticsPage(){
- const demoStats={views:55,favorites:13,messages:3,offers:2,contacts:3};
- const cardItem=state.items.find(x=>/игральн.*(карт|колод)/i.test(x.title||''));
  const published=state.items.filter(x=>x.status==='published');
- const initialRecords=published.length?published:(cardItem?[{...cardItem,status:'published'}]:[]);
- const records=initialRecords.map(x=>{const isDemoCard=/игральн.*(карт|колод)/i.test(x.title||''),s=x.stats||{},hasStats=Number(s.views)||Number(s.favorites)||Number(s.contacts)||Number(s.messages);return isDemoCard&&!hasStats?{...x,stats:{...s,...demoStats},offers:(x.offers||[]).length?x.offers:Array.from({length:2},(_,i)=>({id:'demo-'+i}))}:x;});
  const colors=['#718fbc','#d1b16b','#b77949','#98515a','#8b755b','#6e6870'];
- const data=records.map((item,index)=>{const stats=item.stats||{},value=Math.max(Number(stats.contacts)||0,Number(stats.messages)||0,(item.chats||[]).length,(item.offers||[]).length);return {item,value,color:colors[index%colors.length]};});
+ const colorFor=id=>{let hash=0;for(const char of String(id||''))hash=(hash*31+char.charCodeAt(0))>>>0;return colors[hash%colors.length];};
+ const data=published.map(item=>{const stats=item.stats||{},value=Math.max(Number(stats.contacts)||0,Number(stats.messages)||0,(item.chats||[]).length,(item.offers||[]).length);return {item,value,color:colorFor(item.id)};});
  const total=data.reduce((sum,row)=>sum+row.value,0);
  let progress=0;
  const segments=total?data.map(row=>{const from=progress,share=Math.round(row.value/total*100);progress+=share;return row.color+' '+from+'% '+progress+'%';}).join(', '):'#2a2b30 0 100%';
@@ -465,7 +448,7 @@ root.addEventListener('paste',async e=>{
 root.addEventListener('input',e=>{if(e.target.hasAttribute('data-time-input')){const digits=e.target.value.replace(/\D/g,'').slice(0,4);e.target.value=digits.slice(0,2)+(digits.length>2?':'+digits.slice(2):'');}if(e.target.name==='cardCount'){if(draft)draft.cardCount=Math.max(1,Math.min(10,Number(e.target.value)||1));refreshCardCountNote();}if(draft?.key==='new'&&e.target.closest('#item-form'))syncNewDraft();});
 window.addEventListener('hashchange',()=>{window.scrollTo(0,0);render();});
 async function boot(){
- try{mailboxConnection=JSON.parse(localStorage.getItem(CONNECTION_KEY)||'null');unlocked=!!(mailboxConnection?.repo&&mailboxConnection?.accessKey);state=await readState();if(unlocked)await syncMailboxState(true);const showcase=addShowcaseData(state);if(showcase.changed){state=showcase.state;await saveState(state);if(unlocked)queueMailboxStateSync(0);}if(unlocked){queueMailboxSync();queueMailboxResultSync();}render();}
+ try{mailboxConnection=JSON.parse(localStorage.getItem(CONNECTION_KEY)||'null');unlocked=!!(mailboxConnection?.repo&&mailboxConnection?.accessKey);if(unlocked){state=await readState();await syncMailboxState(true);queueMailboxSync();queueMailboxResultSync();}render();}
  catch(e){root.innerHTML='<main class="login"><div class="login-card"><h1>Не удалось открыть хранилище</h1><p>'+esc(e.message)+'</p><p>Разрешите хранение данных для сайта и обновите страницу.</p></div></main>';}
 }
 boot();
