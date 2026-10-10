@@ -4,6 +4,7 @@ import {uid,todayKey,normalItem,receiveEvent,addSlot,addBooking,freeTimes,dayLoa
 const root=document.getElementById('app');
 const CONNECTION_KEY='avitolog-mailbox-connection-v1';
 let state,unlocked=false,mailboxConnection=null,draft=null,galleryIndex=0,toastTimer,photoBusy=false,commitQueue=Promise.resolve(),mailboxSyncing=false,mailboxSyncTimer,mailboxResultSyncing=false,mailboxResultTimer,mailboxStateTimer,mailboxStateSyncing=false;
+const SITE_REFRESH_INTERVAL=5*60*1000,PROCESSED_FILE_LIMIT=1500;
 const icons={
  back:'<path d="m15 5-7 7 7 7"/>',close:'<path d="m6 6 12 12M18 6 6 18"/>',
  plus:'<path d="M12 5v14M5 12h14"/>',calendar:'<rect x="3" y="5" width="18" height="16" rx="3"/><path d="M7 3v4m10-4v4M3 10h18m-13 5h.01M12 15h.01M17 15h.01"/>',
@@ -51,8 +52,28 @@ function mailboxManifest(task,attachmentNames){
  return JSON.stringify({schema:'avitolog.mailbox.v1',id:task.id,type:task.type,createdAt:task.createdAt,payload,markers:task.markers||{},attachments:attachmentNames},null,2);
 }
 async function putMailboxFile(path,content,message){
- const response=await mailboxRequest(path,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({message,content})});
+ const current=await mailboxRequest(path),body={message,content};
+ if(current.ok){const existing=await current.json();if(existing.sha)body.sha=existing.sha;}
+ else if(current.status!==404)throw Error('Не удалось проверить очередь');
+ const response=await mailboxRequest(path,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
  if(!response.ok)throw Error('Не удалось передать данные в очередь');
+}
+const compactIds=values=>[...new Set(values||[])].slice(-PROCESSED_FILE_LIMIT);
+const itemTime=item=>Date.parse(item?.updatedAt||item?.processedAt||item?.archivedAt||item?.createdAt||0)||0;
+function mergeById(remote,local){
+ const merged=new Map();
+ for(const entry of [...(remote||[]),...(local||[])]){
+  if(!entry?.id)continue;
+  const old=merged.get(entry.id);
+  if(!old||itemTime(entry)>=itemTime(old))merged.set(entry.id,entry);
+ }
+ return [...merged.values()];
+}
+function mergeMailboxStates(remote,local){
+ const deleted=compactIds([...(remote?.deletedMailboxItemIds||[]),...(local?.deletedMailboxItemIds||[])]);
+ const items=mergeById(remote?.items,local?.items).filter(x=>!deleted.includes(x.id)).map(normalItem);
+ const analytics=itemTime(local?.analytics)>=itemTime(remote?.analytics)?(local?.analytics||remote?.analytics):(remote?.analytics||local?.analytics);
+ return {...remote,...local,version:state?.version||local?.version||remote?.version,items,slots:mergeById(remote?.slots,local?.slots),bookings:mergeById(remote?.bookings,local?.bookings),outbox:mergeById(remote?.outbox,local?.outbox),deletedMailboxItemIds:deleted,importedMailboxInbox:compactIds([...(remote?.importedMailboxInbox||[]),...(local?.importedMailboxInbox||[])]),processedMailboxResults:compactIds([...(remote?.processedMailboxResults||[]),...(local?.processedMailboxResults||[])]),analytics:analytics||{updatedAt:null,period:null,source:null},newDraft:local?.newDraft||null};
 }
 function mailboxSnapshot(source){
  const copy=structuredClone(source);
@@ -68,25 +89,23 @@ async function syncMailboxState(loadOnly=false){
   let remote=null,sha=null;
   if(response.ok){const payload=await response.json();sha=payload.sha;try{remote=JSON.parse(base64Text(payload.content));}catch{}}
   if(remote?.schema==='avitolog.state.v1'&&remote.state&&loadOnly){
-   const localOutbox=state.outbox||[],localDeleted=state.deletedMailboxItemIds||[];
-   const imported={importedMailboxInbox:state.importedMailboxInbox||[],processedMailboxResults:state.processedMailboxResults||[]};
-   state={...remote.state,...imported,outbox:localOutbox,deletedMailboxItemIds:[...new Set([...(remote.state.deletedMailboxItemIds||[]),...localDeleted])],version:state.version};
-   state.items=(state.items||[]).filter(x=>!state.deletedMailboxItemIds.includes(x.id));
+   state=mergeMailboxStates(remote.state,state);
    await saveState(state);return;
   }
   if(loadOnly)return;
+  if(remote?.schema==='avitolog.state.v1'&&remote.state){state=mergeMailboxStates(remote.state,state);await saveState(state);}
   const body={message:'Update current Avitolog state',content:textBase64(JSON.stringify(mailboxSnapshot(state)))};if(sha)body.sha=sha;
   const saved=await mailboxRequest(path,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
   if(!saved.ok&&saved.status===409)queueMailboxStateSync(1600);
  }catch{}finally{mailboxStateSyncing=false;}
 }
 async function sendMailboxEvent(task){
- const prefix=utcStamp()+'-'+randomPart(),photos=['item.created','item.edited'].includes(task.type)&&Array.isArray(task.payload?.item?.photos)?task.payload.item.photos:[],attachmentNames=[];
+ const prefix=String(task.createdAt||new Date().toISOString()).replace(/\D/g,'').slice(0,14)+'-'+String(task.id).replace(/[^a-zA-Z0-9-]/g,''),photos=['item.created','item.edited'].includes(task.type)&&Array.isArray(task.payload?.item?.photos)?task.payload.item.photos:[],attachmentNames=photos.map(()=>null);
  for(let index=0;index<photos.length;index++){
   const photo=photos[index],encoded=dataUriBase64(photo.src),extension=fileExtension(photo);
   if(!encoded)continue;
   const name=prefix+'-'+(index+1)+'-photo.'+extension;
-  await putMailboxFile('inbox/'+name,encoded,'Add attachment '+name);attachmentNames.push(name);
+  await putMailboxFile('inbox/'+name,encoded,'Add attachment '+name);attachmentNames[index]=name;
  }
  const name=prefix+'-text.txt',manifest=mailboxManifest(task,attachmentNames);
  await putMailboxFile('inbox/'+name,textBase64(manifest),'Add announcement '+name);
@@ -117,11 +136,12 @@ async function restoreMailboxPhotos(folder,photos){
 }
 function markMailboxFile(s,folder,sha){
  const key=folder==='inbox'?'importedMailboxInbox':'processedMailboxResults';
- s[key]??=[];if(!s[key].includes(sha))s[key].push(sha);
+ s[key]=compactIds([...(s[key]||[]),sha]);
 }
 function mergeRemoteItem(s,source,photos){
  if(!source?.id||s.deletedMailboxItemIds?.includes(source.id))return;
  const index=s.items.findIndex(x=>x.id===source.id),old=index>=0?s.items[index]:{};
+ if(index>=0&&itemTime(old)>itemTime(source))return;
  const next=normalItem({...old,...source,photos:photos?.length?photos:(source.photos||old.photos||[])});
  if(index>=0)s.items[index]=next;else s.items.unshift(next);
 }
@@ -130,11 +150,11 @@ function applyMailboxEvent(s,event,photos=[]){
  if(event?.type==='listing.ready'){
   const source=event.item||remote||{id:event.itemId,status:'queue',photos:event.photos||[]};
   if(!source.id||s.deletedMailboxItemIds?.includes(source.id))return;
-  mergeRemoteItem(s,{...source,...(event.listing||{}),id:event.itemId||source.id,status:'ready',processedAt:event.processedAt||new Date().toISOString()},photos);
+  mergeRemoteItem(s,{...source,...(event.listing||{}),id:event.itemId||source.id,status:'ready',processedAt:event.processedAt||new Date().toISOString(),updatedAt:event.updatedAt||event.processedAt||event.createdAt},photos);
   return;
  }
  if(event?.type==='item.deleted'&&p.itemId){s.items=s.items.filter(x=>x.id!==p.itemId);s.deletedMailboxItemIds??=[];if(!s.deletedMailboxItemIds.includes(p.itemId))s.deletedMailboxItemIds.push(p.itemId);return;}
- if(remote?.id){mergeRemoteItem(s,remote,photos);return;}
+ if(remote?.id){mergeRemoteItem(s,{...remote,updatedAt:remote.updatedAt||event.updatedAt||event.createdAt},photos);return;}
  if(event?.type==='item.status'&&p.itemId){const x=s.items.find(v=>v.id===p.itemId);if(x&&['queue','ready','published','sold','archived'].includes(p.status)){x.status=p.status;if(p.status==='archived')x.archivedAt=p.archivedAt||new Date().toISOString();else delete x.archivedAt;}return;}
  if(event?.type==='item.publish'&&p.itemId){const x=s.items.find(v=>v.id===p.itemId);if(x){x.status='published';delete x.archivedAt;}return;}
  if(event?.type==='item.comment'&&p.itemId&&p.comment){const x=s.items.find(v=>v.id===p.itemId);if(x){x.comments??=[];const i=x.comments.findIndex(v=>v.id===p.comment.id);if(i<0)x.comments.push(p.comment);else x.comments[i]=p.comment;}return;}
@@ -163,7 +183,7 @@ async function syncMailboxResults(){
  if(mailboxResultSyncing||!state||!mailboxConnection?.repo||!mailboxConnection?.accessKey)return;
  mailboxResultSyncing=true;
  try{await syncMailboxInbox();await importMailboxFolder('outbox','processedMailboxResults');}
- catch{}finally{mailboxResultSyncing=false;queueMailboxResultSync(15000);}
+ catch{}finally{mailboxResultSyncing=false;queueMailboxResultSync(SITE_REFRESH_INTERVAL);}
 }
 const btn=(label,action,cls='')=>'<button type="button" class="btn '+cls+'" data-action="'+action+'">'+label+'</button>';
 const link=(label,href,cls='')=>'<a class="'+cls+'" '+(label===icon('back')?'aria-label="Назад" ':label===icon('close')?'aria-label="Закрыть" ':label===icon('next')?'aria-label="Вперёд" ':'')+'href="#'+esc(href)+'">'+label+'</a>';
@@ -314,7 +334,7 @@ async function saveItem(form){
  const f=new FormData(form),isNew=draft.key==='new';
  const raw=String(f.get('raw')||'').trim(),productKind=f.get('productKind')==='batch'?'batch':'single';
  const quantity=productKind==='batch'?(Number(f.get('quantity'))||null):null;
- const data={...(isNew?{}:item(draft.id)),id:isNew?uid():draft.id,status:isNew?'queue':draft.status,title:isNew?(raw.split(/[\n.!?]/)[0]||'Новое объявление').slice(0,50):String(f.get('title')||'').trim(),raw,description:isNew?'':String(f.get('description')||''),photos:draft.photos,price:f.get('price')===''?null:Number(f.get('price')),pickupMinutes:isNew?60:Number(f.get('pickupMinutes')),delivery:!isNew&&f.has('delivery'),productKind,condition:productKind==='single'?(f.get('condition')==='new'?'new':'used'):null,defects:String(f.get('defects')||'').trim(),quantity,generateCards:f.has('generateCards'),cardStyle:f.get('cardStyle')==='studio'?'studio':'realistic',cardCount:Number(f.get('cardCount'))||1};
+ const data={...(isNew?{}:item(draft.id)),id:isNew?uid():draft.id,status:isNew?'queue':draft.status,title:isNew?(raw.split(/[\n.!?]/)[0]||'Новое объявление').slice(0,50):String(f.get('title')||'').trim(),raw,description:isNew?'':String(f.get('description')||''),photos:draft.photos,price:f.get('price')===''?null:Number(f.get('price')),pickupMinutes:isNew?60:Number(f.get('pickupMinutes')),delivery:!isNew&&f.has('delivery'),productKind,condition:productKind==='single'?(f.get('condition')==='new'?'new':'used'):null,defects:String(f.get('defects')||'').trim(),quantity,generateCards:f.has('generateCards'),cardStyle:f.get('cardStyle')==='studio'?'studio':'realistic',cardCount:Number(f.get('cardCount'))||1,updatedAt:new Date().toISOString()};
  if(data.pickupMinutes<15||data.pickupMinutes>480)throw Error('Укажите время получения от 15 до 480 минут');
  const event={id:uid(),type:'item.upsert',payload:normalItem(data)};
  if(isNew)clearTimeout(draftSaveTimer);
@@ -331,10 +351,10 @@ root.addEventListener('submit',async e=>{
  else if(id==='comment-form'){
  const text=String(f.get('text')||'').trim();if(!text)throw Error('Напишите комментарий');
  const itemId=route().parts[1];
- await commit(s=>{const comment={id:uid(),text,createdAt:new Date().toISOString()};const record=s.items.find(x=>x.id===itemId);record.comments.push(comment);addOutbox(s,'item.comment',{itemId,comment,item:record},{action:'listing.comment',listingId:itemId});return s;});
+  await commit(s=>{const comment={id:uid(),text,createdAt:new Date().toISOString()};const record=s.items.find(x=>x.id===itemId);record.comments.push(comment);record.updatedAt=new Date().toISOString();addOutbox(s,'item.comment',{itemId,comment,item:record},{action:'listing.comment',listingId:itemId});return s;});
  render();toast('Комментарий сохранён для обработки');
  }else if(id==='slot-form'){
- const p={...Object.fromEntries(f),id:uid(),kind:'pickup'};await commit(s=>{const next=addSlot(s,p);addOutbox(next,'calendar.slot.opened',{slot:next.slots.find(x=>x.id===p.id)},{action:'calendar.slot.open',slotId:p.id});return next;});go('/calendar?month='+p.date.slice(0,7)+'&day='+p.date);toast('Время открыто');
+ const p={...Object.fromEntries(f),id:uid(),kind:'pickup',updatedAt:new Date().toISOString()};await commit(s=>{const next=addSlot(s,p);addOutbox(next,'calendar.slot.opened',{slot:next.slots.find(x=>x.id===p.id)},{action:'calendar.slot.open',slotId:p.id});return next;});go('/calendar?month='+p.date.slice(0,7)+'&day='+p.date);toast('Время открыто');
  }else if(id==='booking-form'){
  const x=item(f.get('itemId')),o=x.offers.find(v=>v.id===f.get('offerId')),p={...Object.fromEntries(f),buyer:o.buyer,price:o.price};
  await commit(s=>{const next=addBooking(s,p),booking=next.bookings.at(-1);addOutbox(next,'calendar.booking.created',{booking,item:next.items.find(v=>v.id===booking.itemId)},{action:'calendar.booking.create',bookingId:booking.id,listingId:booking.itemId});return next;});go('/slot/'+p.slotId);toast('Встреча сохранена');
@@ -342,7 +362,7 @@ root.addEventListener('submit',async e=>{
  }catch(err){inlineError(err.message);}finally{if(submitter?.isConnected)submitter.disabled=false;}
 });
 async function updateItem(patch){
- const id=route().parts[1];await commit(s=>{const idx=s.items.findIndex(x=>x.id===id);s.items[idx]=normalItem({...s.items[idx],...patch});addOutbox(s,'item.edited',{itemId:id,item:s.items[idx],changes:patch},listingMarkers(s.items[idx],'listing.update'));return s;});
+ const id=route().parts[1];await commit(s=>{const idx=s.items.findIndex(x=>x.id===id);s.items[idx]=normalItem({...s.items[idx],...patch,updatedAt:new Date().toISOString()});addOutbox(s,'item.edited',{itemId:id,item:s.items[idx],changes:patch},listingMarkers(s.items[idx],'listing.update'));return s;});
 }
 root.addEventListener('click',async e=>{
  const b=e.target.closest('[data-action]');if(!b||b.disabled)return;const action=b.dataset.action;
@@ -360,12 +380,12 @@ root.addEventListener('click',async e=>{
  else if(action==='set-price'){await updateItem({price:Number(b.dataset.price)});render();}
  else if(action==='publish'){
  const x=item(route().parts[1]);if(!x.price||!x.title)throw Error('Укажите заголовок и цену перед публикацией');
-  await commit(s=>{const a=s.items.find(i=>i.id===x.id);a.status='published';delete a.archivedAt;addOutbox(s,'item.publish',{itemId:x.id,item:a},listingMarkers(a,'listing.publish'));return s;});
+  await commit(s=>{const a=s.items.find(i=>i.id===x.id);a.status='published';a.updatedAt=new Date().toISOString();delete a.archivedAt;addOutbox(s,'item.publish',{itemId:x.id,item:a},listingMarkers(a,'listing.publish'));return s;});
  go('/item/'+x.id);toast('Перемещено в «Публик.»');
  }else if(action==='archive-item'||action==='restore-item'){
   const x=item(route().parts[1]);if(!x)return;
   const status=action==='archive-item'?'archived':'published';
-   await commit(s=>{const value=s.items.find(i=>i.id===x.id);value.status=status;if(status==='archived')value.archivedAt=new Date().toISOString();else delete value.archivedAt;addOutbox(s,'item.status',{itemId:x.id,item:value,status,archivedAt:value.archivedAt||null},listingMarkers(value,status==='archived'?'listing.archive':'listing.restore'));return s;});
+   await commit(s=>{const value=s.items.find(i=>i.id===x.id);value.status=status;value.updatedAt=new Date().toISOString();if(status==='archived')value.archivedAt=value.updatedAt;else delete value.archivedAt;addOutbox(s,'item.status',{itemId:x.id,item:value,status,archivedAt:value.archivedAt||null},listingMarkers(value,status==='archived'?'listing.archive':'listing.restore'));return s;});
   go(status==='archived'?'/list/ready':'/item/'+x.id);toast(status==='archived'?'Объявление перенесено в «Готовые» с пометкой «Архив»':'Объявление возвращено в опубликованные');
  }else if(action==='delete-item'){
   const id=route().parts[1],x=item(id);if(!x)return;
@@ -378,10 +398,10 @@ root.addEventListener('click',async e=>{
  render();requestAnimationFrame(()=>document.getElementById('day-panel')?.scrollIntoView({behavior:'smooth',block:'start'}));
  }else if(action==='remove-slot'){
  const id=b.dataset.id,s=state.slots.find(x=>x.id===id);
-  await commit(v=>{if(v.bookings.some(x=>x.slotId===id&&x.status!=='cancelled'))throw Error('Сначала отмените назначенные встречи');v.slots=v.slots.filter(x=>x.id!==id);addOutbox(v,'calendar.slot.removed',{slotId:id},{action:'calendar.slot.remove',slotId:id});return v;});
+  await commit(v=>{if(v.bookings.some(x=>x.slotId===id&&x.status!=='cancelled'))throw Error('Сначала отмените назначенные встречи');v.slots=v.slots.filter(x=>x.id!==id);addOutbox(v,'calendar.slot.removed',{slotId:id,updatedAt:new Date().toISOString()},{action:'calendar.slot.remove',slotId:id});return v;});
  go('/calendar?month='+s.date.slice(0,7)+'&day='+s.date);
  }else if(action==='cancel-booking'){
- await commit(s=>{const booking=s.bookings.find(x=>x.id===b.dataset.id);booking.status='cancelled';const o=s.items.find(x=>x.id===booking.itemId)?.offers.find(x=>x.id===booking.offerId);if(o)o.status='pending';addOutbox(s,'calendar.booking.cancelled',{bookingId:booking.id,booking},{action:'calendar.booking.cancel',bookingId:booking.id});return s;});render();toast('Встреча отменена, время освобождено');
+ await commit(s=>{const booking=s.bookings.find(x=>x.id===b.dataset.id);booking.status='cancelled';booking.updatedAt=new Date().toISOString();const o=s.items.find(x=>x.id===booking.itemId)?.offers.find(x=>x.id===booking.offerId);if(o)o.status='pending';addOutbox(s,'calendar.booking.cancelled',{bookingId:booking.id,booking},{action:'calendar.booking.cancel',bookingId:booking.id});return s;});render();toast('Встреча отменена, время освобождено');
  }
  }catch(err){toast(err.message);}finally{if(b.isConnected)b.disabled=false;}
 });
