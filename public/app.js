@@ -180,7 +180,8 @@ function analyticsPage(){
  const demoStats={views:55,favorites:13,messages:3,offers:2,contacts:3};
  const cardItem=state.items.find(x=>/игральн.*(карт|колод)/i.test(x.title||''));
  const published=state.items.filter(x=>x.status==='published');
- const records=published.length?published:(cardItem?[{...cardItem,status:'published',stats:{...cardItem.stats,...demoStats},offers:Array.from({length:2},(_,i)=>({id:'demo-'+i}))}]:[]);
+ const initialRecords=published.length?published:(cardItem?[{...cardItem,status:'published'}]:[]);
+ const records=initialRecords.map(x=>{const isDemoCard=/игральн.*(карт|колод)/i.test(x.title||''),s=x.stats||{},hasLive=Number(s.views)||Number(s.favorites)||Number(s.contacts)||Number(s.messages)||Number(s.offers)||(x.offers||[]).length;return isDemoCard&&!hasLive?{...x,stats:{...s,...demoStats},offers:Array.from({length:2},(_,i)=>({id:'demo-'+i}))}:x;});
  const metrics=x=>{const s=x.stats||{},messages=Number(s.messages??s.contacts??(x.chats||[]).length),offers=Number(s.offers??(x.offers||[]).length);return {views:Number(s.views)||0,favorites:Number(s.favorites)||0,messages,offers};};
  const total=records.reduce((a,x)=>{const m=metrics(x);return {views:a.views+m.views,favorites:a.favorites+m.favorites,messages:a.messages+m.messages,offers:a.offers+m.offers};},{views:0,favorites:0,messages:0,offers:0});
  const selected=records[0],funnel=selected?metrics(selected):null;
