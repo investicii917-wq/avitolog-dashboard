@@ -44,9 +44,10 @@ function addShowcaseData(source){
   changed=true;
  }
  const cards=next.items.find(x=>/игральн.*(карт|колод)/i.test(x.title||''));
- if(cards&&!cards.offers?.some(x=>x.id==='showcase-cards-offer-40')){
-  cards.offers??=[];cards.offers.unshift({id:'showcase-cards-offer-40',buyer:'Покупатель',price:40,status:'pending',method:'pickup',messageCount:1,note:'Готов забрать сейчас за 40 ₽.',createdAt:updatedAt});
-  cards.updatedAt=updatedAt;changed=true;
+ if(cards){
+  const stats=cards.stats||{};
+  if(!Number(stats.views)&&!Number(stats.favorites)&&!Number(stats.contacts)&&!Number(stats.messages)){cards.stats={...stats,views:55,favorites:13,contacts:3,messages:3,offers:2};cards.updatedAt=updatedAt;changed=true;}
+  if(!cards.offers?.some(x=>x.id==='showcase-cards-offer-40')){cards.offers??=[];cards.offers.unshift({id:'showcase-cards-offer-40',buyer:'Покупатель',price:40,status:'pending',method:'pickup',messageCount:1,note:'Готов забрать сейчас за 40 ₽.',createdAt:updatedAt});cards.updatedAt=updatedAt;changed=true;}
  }
  return {state:next,changed};
 }
