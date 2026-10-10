@@ -1,5 +1,5 @@
 
-import {sampleState,VERSION} from './model.js?v=10';
+import {sampleState,VERSION} from './model.js?v=11';
 const DB='avitolog-workspace-v3';
 let dbPromise;
 function database(){

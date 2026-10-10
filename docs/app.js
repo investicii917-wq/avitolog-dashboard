@@ -1,6 +1,6 @@
 
 import {readState,saveState} from './data.js?v=7';
-import {uid,todayKey,normalItem,receiveEvent,addSlot,addBooking,freeTimes,dayLoad,minutes} from './model.js?v=10';
+import {uid,todayKey,normalItem,receiveEvent,addSlot,addBooking,freeTimes,dayLoad,minutes} from './model.js?v=11';
 const root=document.getElementById('app');
 const CONNECTION_KEY='avitolog-mailbox-connection-v1';
 let state,unlocked=false,mailboxConnection=null,draft=null,galleryIndex=0,toastTimer,photoBusy=false,commitQueue=Promise.resolve(),mailboxSyncing=false,mailboxSyncTimer,mailboxResultSyncing=false,mailboxResultTimer,mailboxStateTimer,mailboxStateSyncing=false;
@@ -20,6 +20,7 @@ const plural=(n,one,few,many)=>n+' '+(n%100>=11&&n%100<=14?many:n%10===1?one:n%1
 const money=n=>n==null?'Цена не указана':new Intl.NumberFormat('ru-RU').format(n)+' ₽';
 const statusName={queue:'Ожидает обработки',ready:'Готово к публикации',published:'Опубликовано',sold:'Продано',archived:'В архиве'};
 const item=id=>state.items.find(x=>x.id===id);
+const mediaSrc=photo=>photo?.src||photo?.preview||'';
 const shortDate=d=>new Date(d+'T12:00:00').toLocaleDateString('ru-RU',{day:'numeric',month:'long'});
 const fullDate=d=>new Date(d+'T12:00:00').toLocaleDateString('ru-RU',{day:'numeric',month:'long',weekday:'long'});
 const stamp=d=>new Date(d).toLocaleString('ru-RU',{timeZone:'Europe/Moscow',day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'});
@@ -56,7 +57,7 @@ async function putMailboxFile(path,content,message){
 function mailboxSnapshot(source){
  const copy=structuredClone(source);
  copy.outbox=[];copy.eventIds=[];copy.importedMailboxInbox=[];copy.processedMailboxResults=[];copy.newDraft=null;
- copy.items=(copy.items||[]).map(x=>({...x,photos:(x.photos||[]).map(p=>({...p,src:null}))}));
+ copy.items=(copy.items||[]).map(x=>({...x,photos:(x.photos||[]).map(p=>({...p,src:null,preview:p.preview||null}))}));
  return {schema:'avitolog.state.v1',savedAt:new Date().toISOString(),state:copy};
 }
 async function syncMailboxState(loadOnly=false){
@@ -142,6 +143,7 @@ function applyMailboxEvent(s,event,photos=[]){
  if(event?.type==='calendar.slot.removed'&&p.slotId){s.slots=s.slots.filter(x=>x.id!==p.slotId);s.bookings=s.bookings.filter(x=>x.slotId!==p.slotId);return;}
  if(event?.type==='calendar.booking.created'&&p.booking?.id){if(!s.bookings.some(x=>x.id===p.booking.id))s.bookings.push(p.booking);return;}
  if(event?.type==='calendar.booking.cancelled'&&p.bookingId){const x=s.bookings.find(v=>v.id===p.bookingId);if(x)x.status='cancelled';return;}
+ if(event?.type==='analytics.snapshot'){for(const report of p.items||[]){const x=s.items.find(v=>v.id===report.itemId);if(x)x.stats={...x.stats,...report.stats,messages:report.messages??x.stats?.messages??0,offers:report.offers??x.offers?.length??0};}s.analytics={updatedAt:p.updatedAt||event.createdAt||new Date().toISOString(),period:p.period||null,source:'avito'};return;}
 }
 async function importMailboxFolder(folder,processedKey){
  const listResponse=await mailboxRequest(folder);if(!listResponse.ok)return false;
@@ -175,24 +177,33 @@ function header(tab){
  return '<header class="main-head">'+link(icon('calendar')+'Календарь','/calendar','calendar-link '+(tab==='calendar'?'active':''))+'<nav class="tabs" aria-label="Разделы">'+tabs.map(([key,label,short,href,count])=>link('<span class="long-label">'+label+'</span><span class="short-label">'+short+'</span><span class="count">'+count+'</span>',href,'tab '+(tab===key?'active':''))).join('')+'</nav></header>';}
 function statusIndicator(x){const status=typeof x==='string'?x:x.status,labels={ready:'Готово к публикации',queue:'В обработке',archived:'Архив'},date=status==='archived'&&x.archivedAt?'<span class="archive-date">с '+shortDate(x.archivedAt.slice(0,10))+'</span>':'';return '<span class="processing-status '+(status==='ready'?'ready':status==='archived'?'archived':'processing')+'">'+labels[status]+'</span>'+date;}
 function analyticsPage(){
- const colors=['#d1b16b','#b77949','#98515a','#8b755b','#6e6870'],rows=state.items.filter(x=>x.status==='published').map((x,i)=>({item:x,value:Math.max(Number(x.stats?.contacts)||0,(x.offers||[]).length),color:colors[i%colors.length]})),total=rows.reduce((n,x)=>n+x.value,0),data=rows.map(x=>({...x,percent:total?Math.round(x.value/total*100):0}));
- let at=0;const segments=total?data.map(x=>{const from=at;at+=x.percent;return x.color+' '+from+'% '+at+'%'}).join(', '):'#e7e2da 0 100%';
- const top=section('<h1>Аналитика</h1><p>Данные появятся после первых обработанных объявлений.</p>');
- const chart=data.length?'<section class="interest-card"><h1>Интерес к объявлениям</h1><div class="interest-ring" style="background:conic-gradient('+segments+')"><div><b>'+total+'</b><span>'+plural(total,'интерес','интереса','интересов')+'</span></div></div><div class="interest-legend">'+data.map(x=>'<div class="interest-row"><i style="background:'+x.color+'"></i><span>'+esc(x.item.title)+'</span><b>'+x.percent+'%</b></div>').join('')+'</div></section>':'';
- return header('analytics')+'<main class="container analytics"><section class="analytics-top">'+link(icon('comment')+'Смотреть предложения','/offers','btn accent block')+'</section>'+(!data.length?top:chart)+'</main>';
+ const demoStats={views:55,favorites:13,messages:3,offers:2,contacts:3};
+ const cardItem=state.items.find(x=>/игральн.*(карт|колод)/i.test(x.title||''));
+ const published=state.items.filter(x=>x.status==='published');
+ const records=published.length?published:(cardItem?[{...cardItem,status:'published',stats:{...cardItem.stats,...demoStats},offers:Array.from({length:2},(_,i)=>({id:'demo-'+i}))}]:[]);
+ const metrics=x=>{const s=x.stats||{},messages=Number(s.messages??s.contacts??(x.chats||[]).length),offers=Number(s.offers??(x.offers||[]).length);return {views:Number(s.views)||0,favorites:Number(s.favorites)||0,messages,offers};};
+ const total=records.reduce((a,x)=>{const m=metrics(x);return {views:a.views+m.views,favorites:a.favorites+m.favorites,messages:a.messages+m.messages,offers:a.offers+m.offers};},{views:0,favorites:0,messages:0,offers:0});
+ const selected=records[0],funnel=selected?metrics(selected):null;
+ const source=state.analytics?.source==='avito'?'Avito API':selected?'Демо-данные':'';
+ const top=section('<h1>Интерес к объявлениям</h1><p>Сводка по опубликованным объявлениям'+(source?' · '+source:'')+'.</p><div class="interest-total"><b>'+total.views+'</b><span>просмотров</span></div><div class="metric-row"><span>В избранном <b>'+total.favorites+'</b></span><span>Написали <b>'+total.messages+'</b></span><span>Предложения <b>'+total.offers+'</b></span></div></section>','interest-card');
+ const listingInterest=records.length?section('<h2>Интерес по объявлениям</h2><div class="listing-interest">'+records.map(x=>{const m=metrics(x),maximum=Math.max(...records.map(v=>metrics(v).views),1);return '<div class="listing-interest-row"><div><b>'+esc(x.title)+'</b><small>'+m.views+' просмотров · '+m.messages+' написали</small></div><span><i style="width:'+Math.max(8,Math.round(m.views/maximum*100))+'%"></i></span></div>';}).join('')+'</div>','interest-card'):'';
+ const funnelCard=funnel?section('<div class="funnel-head"><div><h2>Воронка интереса</h2><p>'+esc(selected.title)+'</p></div><span class="analytics-source">'+source+'</span></div><div class="funnel-bars">'+[['Посмотрели',funnel.views,'views'],['Добавили в избранное',funnel.favorites,'favorites'],['Написали',funnel.messages,'messages'],['Сделали предложение',funnel.offers,'offers']].map(([label,value,key],index)=>{const base=Math.max(funnel.views,1),width=Math.max(10,Math.round(value/base*100));return '<div class="funnel-step step-'+key+'"><div><span>'+label+'</span><b>'+value+'</b></div><i style="width:'+width+'%"></i></div>';}).join('')+'</div>','interest-card funnel-card'):'';
+ const empty=section('<h1>Интерес к объявлениям</h1><p>После первой публикации здесь появятся просмотры, избранное, переписки и предложения.</p>','interest-card');
+ return header('analytics')+'<main class="container analytics">'+(records.length?top+listingInterest+funnelCard:empty)+'<section class="analytics-top">'+link(icon('comment')+'Смотреть предложения','/offers','btn accent block')+'</section></main>';
 }
 function allOffersPage(){
  const offers=state.items.flatMap(x=>(x.offers||[]).filter(o=>o.status==='pending').map(o=>({item:x,offer:o}))).sort((a,b)=>String(b.offer.createdAt).localeCompare(String(a.offer.createdAt)));
- return page('Предложения','/analytics',offers.length?'<div class="list global-offers">'+offers.map(({item:x,offer:o})=>link('<div class="thumb">'+(x.photos[0]?'<img src="'+esc(x.photos[0].src)+'" alt="">':icon('photo'))+'</div><div class="row-info"><div class="row-title">'+esc(x.title)+'</div><div class="offer-price-line">Ваша цена '+money(x.price)+' · <b>'+money(o.price)+'</b></div></div><div class="offer-delivery">'+(o.method==='delivery'?icon('box')+'<small>Доставка</small>':'')+'</div>','/item/'+x.id+'/offers','item-row')).join('')+'</div>':section('<p>Новых предложений пока нет.</p>'));}
+ return page('Предложения','/analytics',offers.length?'<div class="list global-offers">'+offers.map(({item:x,offer:o})=>link('<div class="thumb">'+(mediaSrc(x.photos[0])?'<img src="'+esc(mediaSrc(x.photos[0]))+'" alt="">':icon('photo'))+'</div><div class="row-info"><div class="row-title">'+esc(x.title)+'</div><div class="offer-price-line">Ваша цена '+money(x.price)+' · <b>'+money(o.price)+'</b></div></div><div class="offer-delivery">'+(o.method==='delivery'?icon('box')+'<small>Доставка</small>':'')+'</div>','/item/'+x.id+'/offers','item-row')).join('')+'</div>':section('<p>Новых предложений пока нет.</p>'));}
 function listPage(tab){
  if(tab==='queue')return analyticsPage();if(!['ready','published','archived'].includes(tab))tab='ready';
  const rows=state.items.filter(x=>tab==='ready'?(x.status==='queue'||x.status==='ready'||x.status==='archived'):x.status===tab),empty={ready:['Нет объявлений','Добавьте фотографии и заметки о товаре.'],published:['Пока ничего не опубликовано','Здесь появятся объявления после публикации.'],archived:['Архив пуст','Сюда попадут объявления, которые вы уберёте из публикации.']}[tab];
  if(tab==='ready')rows.sort((a,b)=>{const rank=x=>x.status==='archived'?1:0,diff=rank(a)-rank(b);return diff||(rank(a)?String(b.archivedAt||'').localeCompare(String(a.archivedAt||'')):0);});
- return header(tab)+'<main class="container '+(tab==='ready'?'has-dock':'')+'">'+(tab==='archived'?section(link('Вернуться к опубликованным','/list/published','btn outline block')):'')+(rows.length?'<div class="list">'+rows.map(x=>{const photo=x.photos[0],stats=x.stats||{};return link('<div class="thumb">'+(photo?.src?'<img src="'+esc(photo.src)+'" alt="">':' '+icon('photo'))+(photo?'<span class="photo-badge">'+x.photos.length+'</span>':'')+'</div><div class="row-info"><div class="row-title">'+esc(x.title)+'</div><div class="row-sub">'+(tab==='published'?'<span class="stat">'+icon('eye')+(stats.views||0)+'</span><span class="stat">'+icon('heart')+(stats.favorites||0)+'</span><span class="stat">'+icon('comment')+(stats.contacts||0)+'</span>':statusIndicator(x))+'</div></div><div class="row-price">'+money(x.price)+'<small>'+x.photos.length+' фото</small></div>','/item/'+x.id,'item-row')}).join('')+'</div>':'<div class="list empty">'+icon('box')+'<h2>'+empty[0]+'</h2><p>'+empty[1]+'</p></div>')+'</main>'+dockHtml(tab==='ready'?link(icon('plus')+'Добавить объявление','/new','btn primary'):'');}
+ return header(tab)+'<main class="container '+(tab==='ready'?'has-dock':'')+'">'+(tab==='archived'?section(link('Вернуться к опубликованным','/list/published','btn outline block')):'')+(rows.length?'<div class="list">'+rows.map(x=>{const photo=x.photos[0],stats=x.stats||{};return link('<div class="thumb">'+(mediaSrc(photo)?'<img src="'+esc(mediaSrc(photo))+'" alt="">':' '+icon('photo'))+(photo?'<span class="photo-badge">'+x.photos.length+'</span>':'')+'</div><div class="row-info"><div class="row-title">'+esc(x.title)+'</div><div class="row-sub">'+(tab==='published'?'<span class="stat">'+icon('eye')+(stats.views||0)+'</span><span class="stat">'+icon('heart')+(stats.favorites||0)+'</span><span class="stat">'+icon('comment')+(stats.contacts||0)+'</span>':statusIndicator(x))+'</div></div><div class="row-price">'+money(x.price)+'<small>'+x.photos.length+' фото</small></div>','/item/'+x.id,'item-row')}).join('')+'</div>':'<div class="list empty">'+icon('box')+'<h2>'+empty[0]+'</h2><p>'+empty[1]+'</p></div>')+'</main>'+dockHtml(tab==='ready'?link(icon('plus')+'Добавить объявление','/new','btn primary'):'');}
 function gallery(x){
  if(!x.photos.length)return '<div class="gallery gallery-empty">'+icon('photo')+'Фотографии пока не добавлены</div>';
- if(!x.photos.some(p=>p.src))return '<div class="gallery gallery-empty">'+icon('photo')+'Фотографии переданы в обработку</div>';
- return '<div class="gallery"><div class="gallery-track" id="gallery-track">'+x.photos.map((p,i)=>'<figure><img src="'+esc(p.src)+'" alt="'+esc(x.title)+' — фото '+(i+1)+'"></figure>').join('')+'</div>'+(x.photos.length>1?'<button class="gallery-arrow left" data-action="gallery-prev" aria-label="Предыдущее фото">'+icon('back')+'</button><button class="gallery-arrow right" data-action="gallery-next" aria-label="Следующее фото">'+icon('next')+'</button>':'')+'<span class="gallery-counter" id="gallery-counter">1 / '+x.photos.length+'</span></div>'+(x.photos.length>1?'<div class="gallery-thumbs" aria-label="Фотографии">'+x.photos.map((p,i)=>'<button data-action="gallery-at" data-index="'+i+'" aria-label="Фото '+(i+1)+'"><img src="'+esc(p.src)+'" alt=""></button>').join('')+'</div>':'');
+ const visible=x.photos.filter(p=>mediaSrc(p));
+ if(!visible.length)return '<div class="gallery gallery-empty">'+icon('photo')+'Фотографии переданы в обработку</div>';
+ return '<div class="gallery"><div class="gallery-track" id="gallery-track">'+visible.map((p,i)=>'<figure><img src="'+esc(mediaSrc(p))+'" alt="'+esc(x.title)+' — фото '+(i+1)+'"></figure>').join('')+'</div>'+(visible.length>1?'<button class="gallery-arrow left" data-action="gallery-prev" aria-label="Предыдущее фото">'+icon('back')+'</button><button class="gallery-arrow right" data-action="gallery-next" aria-label="Следующее фото">'+icon('next')+'</button>':'')+'<span class="gallery-counter" id="gallery-counter">1 / '+visible.length+'</span></div>'+(visible.length>1?'<div class="gallery-thumbs" aria-label="Фотографии">'+visible.map((p,i)=>'<button data-action="gallery-at" data-index="'+i+'" aria-label="Фото '+(i+1)+'"><img src="'+esc(mediaSrc(p))+'" alt=""></button>').join('')+'</div>':'');
 }
 function detailPage(x){
  const main=gallery(x)+section('<span class="tag">'+statusName[x.status]+'</span><h1 class="detail-title">'+esc(x.title)+'</h1><div class="detail-price">'+money(x.price)+'</div><div class="facts"><div><span>Самовывоз</span><b>'+x.pickupMinutes+' мин на получение</b></div><div><span>Доставка</span><b>'+(x.delivery?'Можно обсудить':'Не предусмотрена')+'</b></div></div>');
@@ -381,6 +392,7 @@ let draftSaveTimer;
 function syncNewDraft(){const form=document.getElementById('item-form');if(!form||draft?.key!=='new')return;const f=new FormData(form);draft.raw=String(f.get('raw')||'');draft.price=f.get('price')===''?null:Number(f.get('price'));draft.productKind=f.get('productKind')==='batch'?'batch':'single';draft.condition=f.get('condition')==='new'?'new':'used';draft.quantity=Number(f.get('quantity'))||1;draft.defects=String(f.get('defects')||'');draft.generateCards=f.has('generateCards');draft.cardStyle=f.get('cardStyle')==='studio'?'studio':'realistic';draft.cardCount=Math.max(1,Math.min(10,Number(f.get('cardCount'))||1));queueDraftSave();}
 function queueDraftSave(){if(draft?.key!=='new')return;const snapshot=structuredClone(draft);clearTimeout(draftSaveTimer);draftSaveTimer=setTimeout(()=>{commit(s=>{s.newDraft=snapshot;return s;}).catch(()=>toast('Не удалось сохранить черновик'));},180);}
 function fileData(file){return new Promise((resolve,reject)=>{const r=new FileReader();r.onload=()=>resolve(r.result);r.onerror=()=>reject(Error('Не удалось прочитать фото '+file.name));r.readAsDataURL(file);});}
+function previewData(src){return new Promise(resolve=>{const image=new Image();image.onload=()=>{const max=480,scale=Math.min(1,max/Math.max(image.width,image.height)),canvas=document.createElement('canvas');canvas.width=Math.max(1,Math.round(image.width*scale));canvas.height=Math.max(1,Math.round(image.height*scale));canvas.getContext('2d').drawImage(image,0,0,canvas.width,canvas.height);resolve(canvas.toDataURL('image/jpeg',.72));};image.onerror=()=>resolve(null);image.src=src;});}
 
 async function ingestPhotos(files,input){
  const targetDraft=draft;if(!targetDraft)return;
@@ -390,7 +402,7 @@ async function ingestPhotos(files,input){
  if(files.some(f=>!f.type.startsWith('image/')))throw Error('Выберите файлы фотографий');
  if(files.some(f=>f.size>20*1024*1024))throw Error('Одна фотография должна быть не больше 20 МБ');
  photoBusy=true;
- const saved=await Promise.all(files.map(async f=>({id:uid(),name:f.name,type:f.type,src:await fileData(f)})));
+ const saved=await Promise.all(files.map(async f=>{const src=await fileData(f);return {id:uid(),name:f.name,type:f.type,src,preview:await previewData(src)};}));
  if(draft!==targetDraft)return;
  targetDraft.photos.push(...saved);refreshPhotos();toast('Добавлено фото: '+files.length);
  }catch(err){toast(err.message);if(input)input.value='';}finally{photoBusy=false;}

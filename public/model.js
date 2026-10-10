@@ -4,7 +4,7 @@ export const todayKey = () => new Intl.DateTimeFormat('sv-SE', {timeZone:'Europe
 export const uid = () => crypto.randomUUID();
 export const minutes = time => { if(!/^\d{2}:\d{2}$/.test(time||'')) return NaN; const [h,m]=time.split(':').map(Number); return h<24&&m<60?h*60+m:NaN; };
 export const toTime = n => String(Math.floor(n/60)).padStart(2,'0')+':'+String(n%60).padStart(2,'0');
-export const blankState = () => ({version:VERSION,items:[],slots:[],bookings:[],outbox:[],eventIds:[],newDraft:null,deletedMailboxItemIds:[],importedMailboxInbox:[],processedMailboxResults:[]});
+export const blankState = () => ({version:VERSION,items:[],slots:[],bookings:[],outbox:[],eventIds:[],newDraft:null,deletedMailboxItemIds:[],importedMailboxInbox:[],processedMailboxResults:[],analytics:{updatedAt:null,period:null,source:null}});
 export function normalItem(x) {
  if(!x.id || !['queue','ready','published','sold','archived'].includes(x.status)) throw Error('Некорректное объявление');
  const price=x.price==null||x.price===''?null:Number(x.price);
@@ -15,7 +15,7 @@ export function normalItem(x) {
  const quantity=Number.isInteger(suppliedQuantity)&&suppliedQuantity>=1?suppliedQuantity:null;
  const suppliedCardCount=Number(x.cardCount);
  const cardCount=Number.isInteger(suppliedCardCount)&&suppliedCardCount>=1&&suppliedCardCount<=10?suppliedCardCount:1;
- return {title:'Новое объявление',raw:'',description:'',photos:[],comments:[],chats:[],price:null,fast:null,optimal:null,slow:null,pickupMinutes:60,delivery:false,stats:{views:0,favorites:0,contacts:0},offers:[],createdAt:new Date().toISOString(),productKind:'single',condition:'used',size:'',defects:'',quantity:null,generateCards:false,cardStyle:'realistic',cardCount:1,cardRequestKey:null,cardRequestStatus:null,...x,price,title:String(x.title||'Новое объявление').slice(0,50),productKind,condition:productKind==='single'?(x.condition==='new'?'new':'used'):null,size:String(x.size||'').slice(0,120),defects:String(x.defects||''),quantity,generateCards:!!x.generateCards,cardStyle:x.cardStyle==='studio'?'studio':'realistic',cardCount,chats:Array.isArray(x.chats)?x.chats:[],comments:Array.isArray(x.comments)?x.comments:[]};
+ return {title:'Новое объявление',raw:'',description:'',photos:[],comments:[],chats:[],price:null,fast:null,optimal:null,slow:null,pickupMinutes:60,delivery:false,stats:{views:0,favorites:0,contacts:0,messages:0,offers:0},offers:[],createdAt:new Date().toISOString(),productKind:'single',condition:'used',size:'',defects:'',quantity:null,generateCards:false,cardStyle:'realistic',cardCount:1,cardRequestKey:null,cardRequestStatus:null,...x,price,title:String(x.title||'Новое объявление').slice(0,50),productKind,condition:productKind==='single'?(x.condition==='new'?'new':'used'):null,size:String(x.size||'').slice(0,120),defects:String(x.defects||''),quantity,generateCards:!!x.generateCards,cardStyle:x.cardStyle==='studio'?'studio':'realistic',cardCount,stats:{views:0,favorites:0,contacts:0,messages:0,offers:0,...(x.stats||{})},chats:Array.isArray(x.chats)?x.chats:[],comments:Array.isArray(x.comments)?x.comments:[]};
 }
 export function receiveEvent(state,event) {
  if(!event || !event.id || !event.type) throw Error('У события должны быть id и type');
