@@ -1,6 +1,7 @@
+import {CARD_STYLES,normalizeCardStyle,normalizeCardFormat,cardSpec,cardRequestKey,cardResultProblem} from './cards.js?v=1';
 
-import {readState,saveState} from './data.js?v=7';
-import {uid,todayKey,normalItem,receiveEvent,addSlot,addBooking,freeTimes,dayLoad,minutes} from './model.js?v=11';
+import {readState,saveState} from './data.js?v=8';
+import {uid,todayKey,normalItem,receiveEvent,addSlot,addBooking,freeTimes,dayLoad,minutes} from './model.js?v=12';
 const root=document.getElementById('app');
 const CONNECTION_KEY='avitolog-mailbox-connection-v1';
 let state,unlocked=false,mailboxConnection=null,draft=null,galleryIndex=0,toastTimer,photoBusy=false,commitQueue=Promise.resolve(),mailboxSyncing=false,mailboxSyncTimer,mailboxResultSyncing=false,mailboxResultTimer,mailboxStateTimer,mailboxStateSyncing=false,calendarReturnPath='/analytics';
@@ -36,7 +37,7 @@ const utcStamp=()=>{const d=new Date(),p=n=>String(n).padStart(2,'0');return d.g
 const randomPart=()=>crypto.getRandomValues(new Uint32Array(1))[0].toString(36).padStart(7,'0');
 const mailboxEvent=(type,payload,markers={})=>({schema:'avitolog.mailbox.v1',id:uid(),type,createdAt:new Date().toISOString(),payload,markers:{origin:'site',...markers}});
 const addOutbox=(s,type,payload,markers={})=>{s.outbox.push(mailboxEvent(type,payload,markers));return s;};
-const listingMarkers=(record,action)=>({action,listingId:record.id,cards:{requested:!!record.generateCards,style:record.generateCards?record.cardStyle:null,count:record.generateCards?record.cardCount:0}});
+const listingMarkers=(record,action)=>({action,listingId:record.id,cards:cardSpec(record)});
 const textBase64=value=>{const bytes=new TextEncoder().encode(value);let binary='';for(const byte of bytes)binary+=String.fromCharCode(byte);return btoa(binary);};
 const dataUriBase64=value=>String(value||'').replace(/^data:[^;]+;base64,/,'');
 const mailboxPath=path=>'https://api.github.com/repos/'+mailboxConnection.repo.split('/').map(encodeURIComponent).join('/')+'/contents'+(path?'/'+path.split('/').map(encodeURIComponent).join('/'):'' );
@@ -100,7 +101,7 @@ async function syncMailboxState(loadOnly=false){
  }catch{}finally{mailboxStateSyncing=false;}
 }
 async function sendMailboxEvent(task){
- const prefix=String(task.createdAt||new Date().toISOString()).replace(/\D/g,'').slice(0,14)+'-'+String(task.id).replace(/[^a-zA-Z0-9-]/g,''),photos=['item.created','item.edited'].includes(task.type)&&Array.isArray(task.payload?.item?.photos)?task.payload.item.photos:[],attachmentNames=photos.map(()=>null);
+ const prefix=String(task.createdAt||new Date().toISOString()).replace(/\D/g,'').slice(0,14)+'-'+String(task.id).replace(/[^a-zA-Z0-9-]/g,''),photos=['item.created','item.edited','cards.requested'].includes(task.type)&&Array.isArray(task.payload?.item?.photos)?task.payload.item.photos:[],attachmentNames=photos.map(()=>null);
  for(let index=0;index<photos.length;index++){
   const photo=photos[index],encoded=dataUriBase64(photo.src),extension=fileExtension(photo);
   if(!encoded)continue;
@@ -128,9 +129,12 @@ async function restoreMailboxPhotos(folder,photos){
  for(const photo of photos||[]){
   if(photo.src){restored.push(photo);continue;}
   if(!photo.file){restored.push(photo);continue;}
-  const response=await mailboxRequest(folder+'/'+photo.file);if(!response.ok)continue;
-  const content=(await response.json()).content;
-  restored.push({...photo,src:'data:'+mediaType(photo)+';base64,'+String(content||'').replace(/\s/g,'')});
+  if(!/^[a-zA-Z0-9А-Яа-яЁё_. -]+$/.test(photo.file)||photo.file.includes('..'))throw Error('Некорректный путь фотографии');
+  const response=await mailboxRequest(folder+'/'+photo.file,{headers:{Accept:'application/vnd.github.raw+json'}});
+  if(!response.ok)throw Error('Не удалось загрузить фотографию. Повторим синхронизацию.');
+  const bytes=await response.arrayBuffer();
+  if(!bytes.byteLength)throw Error('Получена пустая фотография');
+  restored.push({...photo,src:await fileData(new Blob([bytes],{type:mediaType(photo)}))});
  }
  return restored;
 }
@@ -147,6 +151,15 @@ function mergeRemoteItem(s,source,photos){
 }
 function applyMailboxEvent(s,event,photos=[]){
  const p=event?.payload||{},remote=p.item||(event?.type==='item.upsert'?p:null);
+ if(event?.type==='cards.completed'){
+  const record=s.items.find(x=>x.id===p.itemId),problem=cardResultProblem(record,{...p,photos:photos.length?photos:p.photos});
+  if(problem)return;
+  if(!photos.length||photos.some(p=>!p.src))throw Error('Файлы карточек ещё не получены');
+  record.sourcePhotos??=structuredClone(record.photos||[]);
+  record.photos=photos.length?photos:p.photos;record.generatedCards={style:p.style,aspectRatio:p.aspectRatio,requestKey:p.requestKey};
+  record.cardRequestStatus='completed';record.updatedAt=event.createdAt;return;
+ }
+
  if(event?.type==='listing.ready'){
   const source=event.item||remote||{id:event.itemId,status:'queue',photos:event.photos||[]};
   if(!source.id||s.deletedMailboxItemIds?.includes(source.id))return;
@@ -172,9 +185,11 @@ async function importMailboxFolder(folder,processedKey){
   if(state[processedKey]?.includes(file.sha))continue;
   let event;try{event=await readMailboxJson(folder,file);}catch{continue;}
   const remote=event?.payload?.item||(event?.type==='item.upsert'?event.payload:null)||(event?.type==='listing.ready'?(event.item||{photos:event.photos||[]}):null);
-  const photos=remote?.photos?await restoreMailboxPhotos(folder,remote.photos):[];
+  const incomingPhotos=event?.type==='cards.completed'?event.payload?.photos:remote?.photos;
+  const photos=incomingPhotos?await restoreMailboxPhotos(folder,incomingPhotos):[];
   await commit(s=>{if(s[processedKey]?.includes(file.sha))return s;applyMailboxEvent(s,event,photos);markMailboxFile(s,folder,file.sha);return s;});
   if(event?.type==='listing.ready'){toast('Объявление подготовлено к публикации');render();}
+  if(event?.type==='cards.completed'){toast('Карточки синхронизированы');render();}
  }
  return true;
 }
@@ -235,9 +250,14 @@ function detailPage(x){
  const dock=x.status==='ready'?link(icon('edit')+'Редактировать','/item/'+x.id+'/edit','btn')+btn('Опубликовать','publish','primary'):x.status==='archived'?btn('Вернуть в публикацию','restore-item','primary'):'';
  return page(x.title,x.status==='published'||x.status==='sold'?'/list/published':'/list/ready',main+publicationStats+prices+actions+desc+raw+bottom,dock);
 }
-function getDraft(id){const key=id||'new',fresh={photos:[],title:'',raw:'',description:'',price:null,pickupMinutes:60,delivery:false,productKind:'single',condition:'used',defects:'',quantity:1,generateCards:false,cardStyle:'realistic',cardCount:1};if(!draft||draft.key!==key)draft={key,...(id?structuredClone(item(id)):structuredClone(state?.newDraft||fresh))};return draft;}
+function getDraft(id){const key=id||'new',fresh={photos:[],title:'',raw:'',description:'',price:null,pickupMinutes:60,delivery:false,productKind:'single',condition:'used',defects:'',quantity:1,generateCards:false,cardStyle:'realistic',cardFormat:'auto',cardCount:1};if(!draft||draft.key!==key){draft={key,...(id?structuredClone(item(id)):structuredClone(state?.newDraft||fresh))};if(id&&draft.sourcePhotos?.length)draft.photos=structuredClone(draft.sourcePhotos);}return draft;}
 function productFields(d){const kind=d.productKind==='batch'?'batch':'single',condition=d.condition==='new'?'new':'used';return '<section class="section product-section"><h2>Параметры товара</h2><div class="segmented" role="radiogroup" aria-label="Тип товара"><label><input type="radio" name="productKind" value="single" '+(kind==='single'?'checked':'')+'><span>Товар 1</span></label><label><input type="radio" name="productKind" value="batch" '+(kind==='batch'?'checked':'')+'><span>Товар тиражный</span></label></div><div class="product-single '+(kind==='single'?'':'is-hidden')+'"><div class="field-label">Состояние</div><div class="segmented condition" role="radiogroup" aria-label="Состояние"><label><input type="radio" name="condition" value="used" '+(condition==='used'?'checked':'')+'><span>Б/у</span></label><label><input type="radio" name="condition" value="new" '+(condition==='new'?'checked':'')+'><span>Новое</span></label></div></div><div class="product-batch '+(kind==='batch'?'':'is-hidden')+'">'+field('Количество штук','<input name="quantity" type="number" min="1" step="1" inputmode="numeric" value="'+(Number(d.quantity)||1)+'">','Укажите, сколько одинаковых единиц есть в наличии.')+'</div>'+field('Дефекты и нюансы','<textarea name="defects" rows="3" placeholder="Если есть — опишите честно. Это попадёт в обработку объявления.">'+esc(d.defects||'')+'</textarea>')+'</section>';}
-function cardsHtml(d){const enabled=!!d.generateCards,style=d.cardStyle==='studio'?'studio':'realistic',count=Math.max(1,Math.min(10,Number(d.cardCount)||1));return '<section class="section cards-section"><label class="switch-row card-switch"><span><b>Создать карточки</b><small>Передать обработчику задачу на подготовку вариантов</small></span><input type="checkbox" name="generateCards" data-action="cards-toggle" '+(enabled?'checked':'')+'></label><div id="cards-config" class="cards-config '+(enabled?'':'is-hidden')+'"><div class="divider"></div><h2>Вариант карточек</h2><div class="card-style-options"><label class="card-style-option"><input type="radio" name="cardStyle" value="realistic" '+(style==='realistic'?'checked':'')+'><span><b>Реалистичные</b><small>Предмет в чистой домашней обстановке. Оригинальный товар сохраняется.</small></span></label><label class="card-style-option"><input type="radio" name="cardStyle" value="studio" '+(style==='studio'?'checked':'')+'><span><b>Студийные</b><small>Товарная карточка с аккуратной студийной подачей.</small></span></label></div>'+field('Количество карточек','<input name="cardCount" type="number" min="1" max="10" step="1" inputmode="numeric" value="'+count+'">','<span id="card-count-note">В задачу обработчику будет передано '+plural(count,'карточка','карточки','карточек')+'.</span>')+'</div></section>';}
+function cardsHtml(d){
+ const enabled=!!d.generateCards,style=normalizeCardStyle(d.cardStyle),format=normalizeCardFormat(d.cardFormat),count=Math.max(1,Math.min(10,Number(d.cardCount)||1));
+ const options=Object.entries(CARD_STYLES).map(([key,value])=>'<label class="card-style-option"><input type="radio" name="cardStyle" value="'+key+'" '+(style===key?'checked':'')+'><span><b>'+value.label+'</b><small>'+value.description+'</small></span></label>').join('');
+ const formats=[['auto','Подобрать по товару'],['landscape','Горизонтальные · 4:3'],['portrait','Вертикальные · 3:4']].map(([key,label])=>'<option value="'+key+'" '+(format===key?'selected':'')+'>'+label+'</option>').join('');
+ return '<section class="section cards-section"><label class="switch-row card-switch"><span><b>Создать карточки</b><small>Выберите оформление и количество изображений</small></span><input type="checkbox" name="generateCards" data-action="cards-toggle" '+(enabled?'checked':'')+'></label><div id="cards-config" class="cards-config '+(enabled?'':'is-hidden')+'"><div class="divider"></div><h2>Оформление</h2><div class="card-style-options">'+options+'</div>'+field('Формат всей серии','<select name="cardFormat">'+formats+'</select>','Все изображения одного товара будут в одном формате.')+field('Количество карточек','<input name="cardCount" type="number" min="1" max="10" step="1" inputmode="numeric" value="'+count+'">','<span id="card-count-note">В серии '+plural(count,'карточка','карточки','карточек')+'.</span>')+'<p class="help">Преимущества для дизайнерских карточек берём из описания и ваших заметок. Сам товар и его состояние сохраняем.</p></div></section>';
+}
 function photosHtml(d){
  return '<div class="photo-editor-head"><b>Фотографии</b><span class="meta">'+d.photos.length+' / 10</span></div><div class="photo-grid">'+d.photos.map((p,i)=>'<div class="photo-tile"><img src="'+esc(p.src)+'" alt="Фото '+(i+1)+'"><button type="button" class="remove" data-action="photo-remove" data-index="'+i+'" aria-label="Удалить фото '+(i+1)+'">'+icon('close')+'</button>'+(i===0?'<span class="photo-order">Главное</span>':'<button type="button" class="photo-main" data-action="photo-main" data-index="'+i+'">На обложку</button>')+'</div>').join('')+(d.photos.length<10?'<button type="button" class="photo-add" data-action="photo-add">'+icon('plus')+'Добавить фото</button>':'')+'</div><input class="file-input" id="photo-files" type="file" accept="image/*" multiple><p class="help" style="margin-top:10px">Оригиналы фото сохраняются без обработки. До 10 фотографий.</p>';
 }
@@ -331,11 +351,11 @@ async function saveItem(form){
  const f=new FormData(form),isNew=draft.key==='new';
  const raw=String(f.get('raw')||'').trim(),productKind=f.get('productKind')==='batch'?'batch':'single';
  const quantity=productKind==='batch'?(Number(f.get('quantity'))||null):null;
- const data={...(isNew?{}:item(draft.id)),id:isNew?uid():draft.id,status:isNew?'queue':draft.status,title:isNew?(raw.split(/[\n.!?]/)[0]||'Новое объявление').slice(0,50):String(f.get('title')||'').trim(),raw,description:isNew?'':String(f.get('description')||''),photos:draft.photos,price:f.get('price')===''?null:Number(f.get('price')),pickupMinutes:isNew?60:Number(f.get('pickupMinutes')),delivery:!isNew&&f.has('delivery'),productKind,condition:productKind==='single'?(f.get('condition')==='new'?'new':'used'):null,defects:String(f.get('defects')||'').trim(),quantity,generateCards:f.has('generateCards'),cardStyle:f.get('cardStyle')==='studio'?'studio':'realistic',cardCount:Number(f.get('cardCount'))||1,updatedAt:new Date().toISOString()};
+ const data={...(isNew?{}:item(draft.id)),id:isNew?uid():draft.id,status:isNew?'queue':draft.status,title:isNew?(raw.split(/[\n.!?]/)[0]||'Новое объявление').slice(0,50):String(f.get('title')||'').trim(),raw,description:isNew?'':String(f.get('description')||''),photos:draft.photos,price:f.get('price')===''?null:Number(f.get('price')),pickupMinutes:isNew?60:Number(f.get('pickupMinutes')),delivery:!isNew&&f.has('delivery'),productKind,condition:productKind==='single'?(f.get('condition')==='new'?'new':'used'):null,defects:String(f.get('defects')||'').trim(),quantity,generateCards:f.has('generateCards'),cardStyle:normalizeCardStyle(f.get('cardStyle')),cardFormat:normalizeCardFormat(f.get('cardFormat')),cardCount:Number(f.get('cardCount'))||1,updatedAt:new Date().toISOString()};
  if(data.pickupMinutes<15||data.pickupMinutes>480)throw Error('Укажите время получения от 15 до 480 минут');
  const event={id:uid(),type:'item.upsert',payload:normalItem(data)};
  if(isNew)clearTimeout(draftSaveTimer);
- await commit(s=>{const next=receiveEvent(s,event),saved=next.items.find(x=>x.id===data.id),signature=saved.generateCards?[saved.cardStyle,saved.cardCount,...saved.photos.map(p=>p.id)].join(':'):null,previous=isNew?null:item(data.id)?.cardRequestKey;next.newDraft=null;if(signature!==previous){saved.cardRequestKey=signature;saved.cardRequestStatus=signature?'requested':null;}addOutbox(next,isNew?'item.created':'item.edited',{itemId:data.id,item:saved},listingMarkers(saved,isNew?'listing.create':'listing.update'));if(signature&&signature!==previous)addOutbox(next,'cards.requested',{itemId:data.id,item:saved,requestId:uid(),style:saved.cardStyle,count:saved.cardCount,photoIds:saved.photos.map(p=>p.id)},{action:'cards.generate',listingId:data.id,cards:{requested:true,style:saved.cardStyle,count:saved.cardCount}});return next;});
+ await commit(s=>{const next=receiveEvent(s,event),saved=next.items.find(x=>x.id===data.id),signature=cardRequestKey(saved),previous=isNew?null:item(data.id)?.cardRequestKey;next.newDraft=null;if(signature!==previous){saved.cardRequestKey=signature;saved.cardRequestStatus=signature?'requested':null;}addOutbox(next,isNew?'item.created':'item.edited',{itemId:data.id,item:saved},listingMarkers(saved,isNew?'listing.create':'listing.update'));if(signature&&signature!==previous)addOutbox(next,'cards.requested',{itemId:data.id,item:saved,requestId:uid(),...cardSpec(saved),requestKey:signature,photoIds:saved.photos.map(p=>p.id)},{action:'cards.generate',listingId:data.id,cards:{...cardSpec(saved),requestKey:signature}});return next;});
  draft=null;go(isNew?'/list/ready':'/item/'+data.id);toast(isNew?'Объявление добавлено':'Изменения сохранены');
 }
 root.addEventListener('submit',async e=>{
@@ -410,10 +430,10 @@ root.addEventListener('click',async e=>{
 });
 function refreshPhotos(){const el=document.getElementById('photo-editor');if(el)el.innerHTML=photosHtml(draft);refreshCards();queueDraftSave();}
 function refreshCards(){const el=document.getElementById('cards-config');if(!el||!draft)return;const temp=document.createElement('div');temp.innerHTML=cardsHtml(draft);const next=temp.querySelector('#cards-config');if(next)el.replaceWith(next);}
-function refreshCardCountNote(){const value=Math.max(1,Math.min(10,Number(document.querySelector('input[name=cardCount]')?.value)||1)),note=document.getElementById('card-count-note');if(note)note.textContent='В задачу обработчику будет передано '+plural(value,'карточка','карточки','карточек')+'.';}
+function refreshCardCountNote(){const value=Math.max(1,Math.min(10,Number(document.querySelector('input[name=cardCount]')?.value)||1)),note=document.getElementById('card-count-note');if(note)note.textContent='В серии '+plural(value,'карточка','карточки','карточек')+'.';}
 function syncProductFields(){const kind=document.querySelector('input[name=productKind]:checked')?.value||'single';document.querySelector('.product-single')?.classList.toggle('is-hidden',kind!=='single');document.querySelector('.product-batch')?.classList.toggle('is-hidden',kind!=='batch');}
 let draftSaveTimer;
-function syncNewDraft(){const form=document.getElementById('item-form');if(!form||draft?.key!=='new')return;const f=new FormData(form);draft.raw=String(f.get('raw')||'');draft.price=f.get('price')===''?null:Number(f.get('price'));draft.productKind=f.get('productKind')==='batch'?'batch':'single';draft.condition=f.get('condition')==='new'?'new':'used';draft.quantity=Number(f.get('quantity'))||1;draft.defects=String(f.get('defects')||'');draft.generateCards=f.has('generateCards');draft.cardStyle=f.get('cardStyle')==='studio'?'studio':'realistic';draft.cardCount=Math.max(1,Math.min(10,Number(f.get('cardCount'))||1));queueDraftSave();}
+function syncNewDraft(){const form=document.getElementById('item-form');if(!form||draft?.key!=='new')return;const f=new FormData(form);draft.raw=String(f.get('raw')||'');draft.price=f.get('price')===''?null:Number(f.get('price'));draft.productKind=f.get('productKind')==='batch'?'batch':'single';draft.condition=f.get('condition')==='new'?'new':'used';draft.quantity=Number(f.get('quantity'))||1;draft.defects=String(f.get('defects')||'');draft.generateCards=f.has('generateCards');draft.cardStyle=normalizeCardStyle(f.get('cardStyle'));draft.cardFormat=normalizeCardFormat(f.get('cardFormat'));draft.cardCount=Math.max(1,Math.min(10,Number(f.get('cardCount'))||1));queueDraftSave();}
 function queueDraftSave(){if(draft?.key!=='new')return;const snapshot=structuredClone(draft);clearTimeout(draftSaveTimer);draftSaveTimer=setTimeout(()=>{commit(s=>{s.newDraft=snapshot;return s;}).catch(()=>toast('Не удалось сохранить черновик'));},180);}
 function fileData(file){return new Promise((resolve,reject)=>{const r=new FileReader();r.onload=()=>resolve(r.result);r.onerror=()=>reject(Error('Не удалось прочитать фото '+file.name));r.readAsDataURL(file);});}
 function previewData(src){return new Promise(resolve=>{const image=new Image();image.onload=()=>{const max=480,scale=Math.min(1,max/Math.max(image.width,image.height)),canvas=document.createElement('canvas');canvas.width=Math.max(1,Math.round(image.width*scale));canvas.height=Math.max(1,Math.round(image.height*scale));canvas.getContext('2d').drawImage(image,0,0,canvas.width,canvas.height);resolve(canvas.toDataURL('image/jpeg',.72));};image.onerror=()=>resolve(null);image.src=src;});}
@@ -434,7 +454,8 @@ async function ingestPhotos(files,input){
 root.addEventListener('change',async e=>{
  const input=e.target;
  if(input.name==='productKind'){if(draft)draft.productKind=input.value==='batch'?'batch':'single';syncProductFields();syncNewDraft();return;}
- if(input.name==='cardStyle'&&draft){draft.cardStyle=input.value==='studio'?'studio':'realistic';refreshCards();queueDraftSave();return;}
+ if(input.name==='cardStyle'&&draft){draft.cardStyle=normalizeCardStyle(input.value);refreshCards();queueDraftSave();return;}
+ if(input.name==='cardFormat'&&draft){draft.cardFormat=normalizeCardFormat(input.value);queueDraftSave();return;}
  if(input.name==='cardCount'&&draft){draft.cardCount=Math.max(1,Math.min(10,Number(input.value)||1));refreshCards();queueDraftSave();return;}
  if(draft?.key==='new'&&input.closest('#item-form'))syncNewDraft();
  if(input.id==='booking-slot'){const r=route();go('/item/'+r.parts[1]+'/book/'+r.parts[3]+'?slot='+input.value);return;}

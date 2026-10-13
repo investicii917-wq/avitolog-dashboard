@@ -1,0 +1,74 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import vm from 'node:vm';
+import {webcrypto} from 'node:crypto';
+import * as cards from '../public/cards.js';
+import * as model from '../public/model.js';
+let checks=0;
+const check=(ok)=>{assert.ok(ok);checks++;};
+for(const style of ['realistic','studio','designer'])for(const format of ['auto','landscape','portrait'])for(const count of [1,3,10]){
+ const record=model.normalItem({id:'x',status:'queue',generateCards:true,cardStyle:style,cardFormat:format,cardCount:count});
+ const spec=cards.cardSpec(record);
+ check(spec.style===style&&spec.count===count&&spec.format===format);
+ check(JSON.parse(JSON.stringify(record)).cardStyle===style);
+}
+const legacy=model.normalItem({id:'old',status:'ready'});
+check(legacy.cardFormat==='auto'&&legacy.cardStyle==='realistic');
+check(cards.cardSpec(legacy).count===0);
+const base=model.normalItem({id:'x',status:'queue',raw:'Клавиатура',generateCards:true,cardStyle:'designer',cardFormat:'landscape',cardCount:3,photos:[{id:'src',type:'image/png',src:'data:image/png;base64,YQ==',name:'original.png'}]});
+base.cardRequestKey=cards.cardRequestKey(base);
+check(cards.cardRequestKey(structuredClone(base))===base.cardRequestKey);
+for(const change of [{cardFormat:'portrait'},{cardStyle:'studio'},{cardCount:2},{raw:'Другой факт'},{description:'Новое описание'},{photos:[{id:'other'}]}])check(cards.cardRequestKey({...base,...change})!==base.cardRequestKey);
+const photos=[1,2,3].map(n=>({id:'p'+n,file:'20261013-p'+n+'.png',width:1600,height:1200}));
+const result={itemId:base.id,requestKey:base.cardRequestKey,style:'designer',aspectRatio:'4:3',photos};
+check(cards.cardResultProblem(base,result)===null);
+for(const change of [{requestKey:'old'},{style:'studio'},{aspectRatio:'3:4'},{photos:photos.slice(1)},{photos:photos.map(p=>({...p,width:1599}))},{photos:photos.map(p=>({...p,id:'same'}))}])check(!!cards.cardResultProblem(base,{...result,...change}));
+check(!!cards.cardResultProblem({...base,generateCards:false},result));
+
+const fakeRoot={addEventListener(){}};
+const context=vm.createContext({...cards,...model,crypto:webcrypto,console,structuredClone,Date,Map,Set,TextEncoder,TextDecoder,AbortController,Blob,
+ btoa:s=>Buffer.from(s,'binary').toString('base64'),atob:s=>Buffer.from(s,'base64').toString('binary'),
+ setTimeout:()=>0,clearTimeout(){},URLSearchParams,
+ document:{getElementById:()=>fakeRoot},window:{addEventListener(){}},location:{hash:''},
+ saveState:async()=>{},readState:async()=>model.blankState()});
+let source=fs.readFileSync(new URL('../public/app.js',import.meta.url),'utf8').replace(/^import .*;\r?\n/gm,'').replace(/\nboot\(\);\s*$/,'');
+source+='\nglobalThis.testApi={cardsHtml,mailboxManifest,applyMailboxEvent,sendMailboxEvent,restoreMailboxPhotos,connect:(c)=>{mailboxConnection=c},snapshot:mailboxSnapshot};';
+vm.runInContext(source,context);
+const api=context.testApi;
+const html=api.cardsHtml(base);
+check(html.includes('value="designer" checked'));
+check(html.includes('value="landscape" selected'));
+check(html.includes('value="3"'));
+const event={id:'test-event',type:'cards.requested',createdAt:'2026-10-13T10:00:00Z',payload:{item:base,itemId:base.id,...cards.cardSpec(base),requestKey:base.cardRequestKey},markers:{cards:cards.cardSpec(base)}};
+const manifest=JSON.parse(api.mailboxManifest(event,['test-photo.png']));
+check(manifest.payload.style==='designer'&&manifest.payload.item.photos[0].file==='test-photo.png');
+check(!JSON.stringify(manifest).includes('data:image'));
+const memoryRepo=new Map(),puts=[];
+context.fetch=async(url,options={})=>{
+ const path=decodeURIComponent(url.split('/contents/')[1]);
+ if(options.method==='PUT'){
+  const body=JSON.parse(options.body);memoryRepo.set(path,body.content);puts.push(path);return {ok:true,status:201};
+ }
+ const content=memoryRepo.get(path);
+ return {ok:!!content,status:content?200:404,json:async()=>({content,sha:'mock-sha'}),arrayBuffer:async()=>Uint8Array.from(Buffer.from(content,'base64')).buffer};
+};
+api.connect({repo:'test/private-mailbox',accessKey:'test-only-not-a-secret'});
+await api.sendMailboxEvent(event);
+check(puts.length===2&&puts[0].endsWith('.png')&&puts[1].endsWith('-text.txt'));
+const received=JSON.parse(Buffer.from(memoryRepo.get(puts[1]),'base64').toString('utf8'));
+check(received.payload.requestKey===base.cardRequestKey&&received.markers.cards.style==='designer');
+check(!!received.payload.item.photos[0].file);
+// Separate state represents another device. No browser credentials or real listings involved.
+const second=model.blankState();second.items.push(structuredClone(base));
+const loaded=photos.map(p=>({...p,src:'data:image/png;base64,YQ=='}));
+api.applyMailboxEvent(second,{type:'cards.completed',createdAt:'2026-10-13T10:01:00Z',payload:result},loaded);
+check(second.items[0].photos.length===3&&second.items[0].cardRequestStatus==='completed');
+check(second.items[0].sourcePhotos[0].id==='src');
+check(second.items[0].status==='queue');
+const saved=JSON.stringify(second);
+api.applyMailboxEvent(second,{type:'cards.completed',payload:{...result,requestKey:'obsolete'}},loaded);
+check(JSON.stringify(second)===saved);
+const third=JSON.parse(JSON.stringify(api.snapshot(second))).state;
+check(third.items[0].cardStyle==='designer'&&third.items[0].cardFormat==='landscape'&&third.items[0].photos[0].preview);
+console.log(JSON.stringify({passed:true,checks,transport:'in-memory GitHub Contents API; separate device state',liveGitHub:false}));
+

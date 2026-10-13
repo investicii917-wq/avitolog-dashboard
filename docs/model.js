@@ -1,3 +1,4 @@
+import {normalizeCardStyle,normalizeCardFormat} from './cards.js?v=1';
 
 export const VERSION = 5;
 export const todayKey = () => new Intl.DateTimeFormat('sv-SE', {timeZone:'Europe/Moscow',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
@@ -15,7 +16,7 @@ export function normalItem(x) {
  const quantity=Number.isInteger(suppliedQuantity)&&suppliedQuantity>=1?suppliedQuantity:null;
  const suppliedCardCount=Number(x.cardCount);
  const cardCount=Number.isInteger(suppliedCardCount)&&suppliedCardCount>=1&&suppliedCardCount<=10?suppliedCardCount:1;
- return {title:'Новое объявление',raw:'',description:'',photos:[],comments:[],chats:[],price:null,fast:null,optimal:null,slow:null,pickupMinutes:60,delivery:false,stats:{views:0,favorites:0,contacts:0,messages:0,offers:0},offers:[],createdAt:new Date().toISOString(),productKind:'single',condition:'used',size:'',defects:'',quantity:null,generateCards:false,cardStyle:'realistic',cardCount:1,cardRequestKey:null,cardRequestStatus:null,...x,price,title:String(x.title||'Новое объявление').slice(0,50),productKind,condition:productKind==='single'?(x.condition==='new'?'new':'used'):null,size:String(x.size||'').slice(0,120),defects:String(x.defects||''),quantity,generateCards:!!x.generateCards,cardStyle:x.cardStyle==='studio'?'studio':'realistic',cardCount,stats:{views:0,favorites:0,contacts:0,messages:0,offers:0,...(x.stats||{})},chats:Array.isArray(x.chats)?x.chats:[],comments:Array.isArray(x.comments)?x.comments:[]};
+ return {title:'Новое объявление',raw:'',description:'',photos:[],comments:[],chats:[],price:null,fast:null,optimal:null,slow:null,pickupMinutes:60,delivery:false,stats:{views:0,favorites:0,contacts:0,messages:0,offers:0},offers:[],createdAt:new Date().toISOString(),productKind:'single',condition:'used',size:'',defects:'',quantity:null,generateCards:false,cardStyle:'realistic',cardCount:1,cardRequestKey:null,cardRequestStatus:null,...x,price,title:String(x.title||'Новое объявление').slice(0,50),productKind,condition:productKind==='single'?(x.condition==='new'?'new':'used'):null,size:String(x.size||'').slice(0,120),defects:String(x.defects||''),quantity,generateCards:!!x.generateCards,cardStyle:normalizeCardStyle(x.cardStyle),cardFormat:normalizeCardFormat(x.cardFormat),cardCount,stats:{views:0,favorites:0,contacts:0,messages:0,offers:0,...(x.stats||{})},chats:Array.isArray(x.chats)?x.chats:[],comments:Array.isArray(x.comments)?x.comments:[]};
 }
 export function receiveEvent(state,event) {
  if(!event || !event.id || !event.type) throw Error('У события должны быть id и type');
