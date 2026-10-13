@@ -409,7 +409,7 @@ async function saveItem(form){
  const existing=isNew?null:item(draft.id);
  const changedPhotos=!isNew&&!samePhotos(existing?.photos,draft.photos);
  if(isNew)data.sourcePhotos=structuredClone(draft.photos);
- else if(changedPhotos){if(existing?.sourcePhotos?.length)rememberPhotoSet(data,existing.sourcePhotos,'Предыдущие исходники','source');data.sourcePhotos=structuredClone(draft.photos);}else data.sourcePhotos=structuredClone(existing?.sourcePhotos||[]);
+ else if(changedPhotos){if(existing?.photos?.length)rememberPhotoSet(data,existing.photos,existing.generatedCards?'Предыдущая серия карточек':'Предыдущие фотографии',existing.generatedCards?'generated':'manual');if(existing?.sourcePhotos?.length)rememberPhotoSet(data,existing.sourcePhotos,'Предыдущие исходники','source');data.sourcePhotos=structuredClone(draft.photos);}else data.sourcePhotos=structuredClone(existing?.sourcePhotos||[]);
    if(data.pickupMinutes<15||data.pickupMinutes>480)throw Error('Укажите время получения от 15 до 480 минут');
  const event={id:uid(),type:'item.upsert',payload:normalItem(data)};
  if(isNew)clearTimeout(draftSaveTimer);
