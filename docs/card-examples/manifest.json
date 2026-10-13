@@ -1,0 +1,65 @@
+[
+  {
+    "file": "home-01.png",
+    "width": 1448,
+    "height": 1086,
+    "sha256": "8fb501ce9cd2028780b648b6f425e13723e5df3ac8dd3e3bacd3860fb5a72336",
+    "quality": "design-preview-not-approved-for-sale"
+  },
+  {
+    "file": "home-02.png",
+    "width": 1448,
+    "height": 1086,
+    "sha256": "9467650a352141a29a0d4d28f2a03871419f95ed78ae02018d282110d120d596",
+    "quality": "design-preview-not-approved-for-sale"
+  },
+  {
+    "file": "home-03.png",
+    "width": 1448,
+    "height": 1086,
+    "sha256": "e924c5374cbd65ec368af4514953d4221b7fc68b40d3dd1153a1492c5158a101",
+    "quality": "design-preview-not-approved-for-sale"
+  },
+  {
+    "file": "studio-01.png",
+    "width": 1448,
+    "height": 1086,
+    "sha256": "eecc272f50d766145d5f7c8f5037b56f53b922f808f42ea0b7cfeac3fcf38885",
+    "quality": "design-preview-not-approved-for-sale"
+  },
+  {
+    "file": "studio-02.png",
+    "width": 1448,
+    "height": 1086,
+    "sha256": "2f378b197c71497ee290d7f0aded2c5c103801e3d33e2a9f80647c263d1c2393",
+    "quality": "design-preview-not-approved-for-sale"
+  },
+  {
+    "file": "studio-03.png",
+    "width": 1448,
+    "height": 1086,
+    "sha256": "acddf32093df90171425f5d75d7a2625e242801597fa2ee69e0918bd7ad17e3d",
+    "quality": "design-preview-not-approved-for-sale"
+  },
+  {
+    "file": "designer-01.png",
+    "width": 1448,
+    "height": 1086,
+    "sha256": "e5d4b842e61bb1b7e34c7fb369a5593d35af9ca7487aa4b9ab380d57a6d49e90",
+    "quality": "design-preview-not-approved-for-sale"
+  },
+  {
+    "file": "designer-02.png",
+    "width": 1448,
+    "height": 1086,
+    "sha256": "e15243e2512f58ed18d335fdf11cf30f049f5110d2ccc18efc0a21b2c776e465",
+    "quality": "design-preview-not-approved-for-sale"
+  },
+  {
+    "file": "designer-03.png",
+    "width": 1448,
+    "height": 1086,
+    "sha256": "1226d2124a12fe59eaaec32c3611ba3432eb4c7ef77fa64d61dd3d03cff24ea8",
+    "quality": "design-preview-not-approved-for-sale"
+  }
+]

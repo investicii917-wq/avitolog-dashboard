@@ -50,6 +50,7 @@ function fileExtension(photo){const type=String(photo.type||'').toLowerCase();if
 function mailboxManifest(task,attachmentNames){
  const payload=structuredClone(task.payload||{}),photos=payload?.item?.photos;
  if(Array.isArray(photos))payload.item.photos=photos.map((photo,index)=>({id:photo.id,name:photo.name||('photo-'+(index+1)),type:photo.type||'image/jpeg',file:attachmentNames[index]||null}));
+ if(payload.item)delete payload.item.sourcePhotos;
  return JSON.stringify({schema:'avitolog.mailbox.v1',id:task.id,type:task.type,createdAt:task.createdAt,payload,markers:task.markers||{},attachments:attachmentNames},null,2);
 }
 async function putMailboxFile(path,content,message){
@@ -88,7 +89,8 @@ async function syncMailboxState(loadOnly=false){
  try{
   const path='state/site-state.json',response=await mailboxRequest(path);
   let remote=null,sha=null;
-  if(response.ok){const payload=await response.json();sha=payload.sha;try{remote=JSON.parse(base64Text(payload.content));}catch{}}
+  if(response.ok){const payload=await response.json();sha=payload.sha;remote=await decodeMailboxJson(path,payload);}
+  else if(response.status!==404)throw Error('Не удалось прочитать состояние');
   if(remote?.schema==='avitolog.state.v1'&&remote.state&&loadOnly){
    state=mergeMailboxStates(remote.state,state);
    await saveState(state);return;
@@ -103,7 +105,7 @@ async function syncMailboxState(loadOnly=false){
 async function sendMailboxEvent(task){
  const prefix=String(task.createdAt||new Date().toISOString()).replace(/\D/g,'').slice(0,14)+'-'+String(task.id).replace(/[^a-zA-Z0-9-]/g,''),photos=['item.created','item.edited','cards.requested'].includes(task.type)&&Array.isArray(task.payload?.item?.photos)?task.payload.item.photos:[],attachmentNames=photos.map(()=>null);
  for(let index=0;index<photos.length;index++){
-  const photo=photos[index],encoded=dataUriBase64(photo.src),extension=fileExtension(photo);
+  const photo=photos[index],encoded=dataUriBase64(photo.src||photo.preview),extension=fileExtension(photo);
   if(!encoded)continue;
   const name=prefix+'-'+(index+1)+'-photo.'+extension;
   await putMailboxFile('inbox/'+name,encoded,'Add attachment '+name);attachmentNames[index]=name;
@@ -122,7 +124,13 @@ async function syncMailbox(){
  }finally{mailboxSyncing=false;if(state?.outbox.some(x=>!x.deliveredAt))queueMailboxSync(10000);}
 }
 const base64Text=value=>{const binary=atob(String(value||'').replace(/\s/g,'')),bytes=Uint8Array.from(binary,c=>c.charCodeAt(0));return new TextDecoder().decode(bytes);};
-async function readMailboxJson(folder,file){const response=await mailboxRequest(folder+'/'+file.name);if(!response.ok)throw Error('Не удалось прочитать файл очереди');return JSON.parse(base64Text((await response.json()).content));}
+async function decodeMailboxJson(path,payload){
+ if(payload.content&&payload.encoding!=='none')return JSON.parse(base64Text(payload.content));
+ const raw=await mailboxRequest(path,{headers:{Accept:'application/vnd.github.raw+json'}});
+ if(!raw.ok)throw Error('Не удалось прочитать большой файл');
+ return JSON.parse(await raw.text());
+}
+async function readMailboxJson(folder,file){const path=folder+'/'+file.name,response=await mailboxRequest(path);if(!response.ok)throw Error('Не удалось прочитать файл очереди');return decodeMailboxJson(path,await response.json());}
 const mediaType=photo=>photo.type||({jpg:'image/jpeg',jpeg:'image/jpeg',png:'image/png',gif:'image/gif',webp:'image/webp'}[(String(photo.file||'').split('.').pop()||'').toLowerCase()]||'image/jpeg');
 async function restoreMailboxPhotos(folder,photos){
  const restored=[];
@@ -156,7 +164,7 @@ function applyMailboxEvent(s,event,photos=[]){
   if(problem)return;
   if(!photos.length||photos.some(p=>!p.src))throw Error('Файлы карточек ещё не получены');
   record.sourcePhotos??=structuredClone(record.photos||[]);
-  record.photos=photos.length?photos:p.photos;record.generatedCards={style:p.style,aspectRatio:p.aspectRatio,requestKey:p.requestKey};
+  record.photos=photos.length?photos:p.photos;record.generatedCards={style:p.style,aspectRatio:p.aspectRatio,requestKey:p.requestKey,quality:p.quality||'review-required'};
   record.cardRequestStatus='completed';record.updatedAt=event.createdAt;return;
  }
 
@@ -189,7 +197,7 @@ async function importMailboxFolder(folder,processedKey){
   const photos=incomingPhotos?await restoreMailboxPhotos(folder,incomingPhotos):[];
   await commit(s=>{if(s[processedKey]?.includes(file.sha))return s;applyMailboxEvent(s,event,photos);markMailboxFile(s,folder,file.sha);return s;});
   if(event?.type==='listing.ready'){toast('Объявление подготовлено к публикации');render();}
-  if(event?.type==='cards.completed'){toast('Карточки синхронизированы');render();}
+  if(event?.type==='cards.completed'&&state.items.find(x=>x.id===event.payload?.itemId)?.generatedCards?.requestKey===event.payload?.requestKey){toast('Карточки синхронизированы');render();}
  }
  return true;
 }
@@ -239,7 +247,7 @@ function gallery(x){
  return '<div class="gallery"><div class="gallery-track" id="gallery-track">'+visible.map((p,i)=>'<figure><img src="'+esc(mediaSrc(p))+'" alt="'+esc(x.title)+' — фото '+(i+1)+'"></figure>').join('')+'</div>'+(visible.length>1?'<button class="gallery-arrow left" data-action="gallery-prev" aria-label="Предыдущее фото">'+icon('back')+'</button><button class="gallery-arrow right" data-action="gallery-next" aria-label="Следующее фото">'+icon('next')+'</button>':'')+'<span class="gallery-counter" id="gallery-counter">1 / '+visible.length+'</span></div>'+(visible.length>1?'<div class="gallery-thumbs" aria-label="Фотографии">'+visible.map((p,i)=>'<button data-action="gallery-at" data-index="'+i+'" aria-label="Фото '+(i+1)+'"><img src="'+esc(mediaSrc(p))+'" alt=""></button>').join('')+'</div>':'');
 }
 function detailPage(x){
- const main=gallery(x)+section('<span class="tag">'+statusName[x.status]+'</span><h1 class="detail-title">'+esc(x.title)+'</h1><div class="detail-price">'+money(x.price)+'</div><div class="facts"><div><span>Самовывоз</span><b>'+x.pickupMinutes+' мин на получение</b></div><div><span>Доставка</span><b>'+(x.delivery?'Можно обсудить':'Не предусмотрена')+'</b></div></div>');
+ const main=gallery(x)+(x.generatedCards?.quality==='design-preview'?section('<p class="help">Проверка оформления: изображения демонстрационные. Надписи на товаре требуют исправления перед публикацией.</p>'):'')+section('<span class="tag">'+statusName[x.status]+'</span><h1 class="detail-title">'+esc(x.title)+'</h1><div class="detail-price">'+money(x.price)+'</div><div class="facts"><div><span>Самовывоз</span><b>'+x.pickupMinutes+' мин на получение</b></div><div><span>Доставка</span><b>'+(x.delivery?'Можно обсудить':'Не предусмотрена')+'</b></div></div>');
  const stats=x.stats||{},publicationStats=(x.status==='published'||x.status==='archived')?section('<h2>Статистика объявления</h2><div class="stats-grid"><div>'+icon('eye')+'<span>Просмотры</span><b>'+Number(stats.views||0)+'</b></div><div>'+icon('heart')+'<span>В избранном</span><b>'+Number(stats.favorites||0)+'</b></div><div>'+icon('comment')+'<span>Обращения</span><b>'+Number(stats.contacts||0)+'</b></div><div>'+icon('box')+'<span>Предложения</span><b>'+(x.offers||[]).length+'</b></div></div>'):'';
  const actions=x.status==='published'?section('<div class="actions-stack">'+link(icon('comment')+'Написавшие <span class="count">'+(x.chats||[]).length+'</span>'+icon('next'),'/item/'+x.id+'/writers','btn outline')+link(icon('comment')+'Предложения <span class="count">'+x.offers.length+'</span>'+icon('next'),'/item/'+x.id+'/offers','btn accent')+'</div>'):'';
  const prices=x.status==='ready'?section('<h2>Цена продажи</h2><div class="price-choices">'+[['Быстрая',x.fast],['Оптимальная',x.optimal],['Долгая',x.slow]].map(([label,p])=>'<button class="price-choice '+(p===x.price?'active':'')+'" data-action="set-price" data-price="'+(p??'')+'" '+(p==null?'disabled':'')+'><small>'+label+'</small><b>'+money(p)+'</b></button>').join('')+'</div><form id="price-form" class="field"><label for="own-price">Своя цена, ₽</label><div class="inline-form"><input id="own-price" name="price" type="number" inputmode="numeric" min="0" max="1000000000" value="'+(x.price??'')+'" required><button class="btn">Сохранить</button></div></form>'):'';
@@ -256,7 +264,7 @@ function cardsHtml(d){
  const enabled=!!d.generateCards,style=normalizeCardStyle(d.cardStyle),format=normalizeCardFormat(d.cardFormat),count=Math.max(1,Math.min(10,Number(d.cardCount)||1));
  const options=Object.entries(CARD_STYLES).map(([key,value])=>'<label class="card-style-option"><input type="radio" name="cardStyle" value="'+key+'" '+(style===key?'checked':'')+'><span><b>'+value.label+'</b><small>'+value.description+'</small></span></label>').join('');
  const formats=[['auto','Подобрать по товару'],['landscape','Горизонтальные · 4:3'],['portrait','Вертикальные · 3:4']].map(([key,label])=>'<option value="'+key+'" '+(format===key?'selected':'')+'>'+label+'</option>').join('');
- return '<section class="section cards-section"><label class="switch-row card-switch"><span><b>Создать карточки</b><small>Выберите оформление и количество изображений</small></span><input type="checkbox" name="generateCards" data-action="cards-toggle" '+(enabled?'checked':'')+'></label><div id="cards-config" class="cards-config '+(enabled?'':'is-hidden')+'"><div class="divider"></div><h2>Оформление</h2><div class="card-style-options">'+options+'</div>'+field('Формат всей серии','<select name="cardFormat">'+formats+'</select>','Все изображения одного товара будут в одном формате.')+field('Количество карточек','<input name="cardCount" type="number" min="1" max="10" step="1" inputmode="numeric" value="'+count+'">','<span id="card-count-note">В серии '+plural(count,'карточка','карточки','карточек')+'.</span>')+'<p class="help">Преимущества для дизайнерских карточек берём из описания и ваших заметок. Сам товар и его состояние сохраняем.</p></div></section>';
+ return '<section class="section cards-section"><label class="switch-row card-switch"><span><b>Создать карточки</b><small>Выберите оформление и количество изображений</small></span><input type="checkbox" name="generateCards" data-action="cards-toggle" '+(enabled?'checked':'')+'></label><div id="cards-config" class="cards-config '+(enabled?'':'is-hidden')+'"><div class="divider"></div><h2>Оформление</h2><p class="help"><a href="./card-examples/" target="_blank" rel="noopener">Посмотреть примеры оформления</a></p><div class="card-style-options">'+options+'</div>'+field('Формат всей серии','<select name="cardFormat">'+formats+'</select>','Все изображения одного товара будут в одном формате.')+field('Количество карточек','<input name="cardCount" type="number" min="1" max="10" step="1" inputmode="numeric" value="'+count+'">','<span id="card-count-note">В серии '+plural(count,'карточка','карточки','карточек')+'.</span>')+'<p class="help">Преимущества для дизайнерских карточек берём из описания и ваших заметок. Сам товар и его состояние сохраняем.</p></div></section>';
 }
 function photosHtml(d){
  return '<div class="photo-editor-head"><b>Фотографии</b><span class="meta">'+d.photos.length+' / 10</span></div><div class="photo-grid">'+d.photos.map((p,i)=>'<div class="photo-tile"><img src="'+esc(p.src)+'" alt="Фото '+(i+1)+'"><button type="button" class="remove" data-action="photo-remove" data-index="'+i+'" aria-label="Удалить фото '+(i+1)+'">'+icon('close')+'</button>'+(i===0?'<span class="photo-order">Главное</span>':'<button type="button" class="photo-main" data-action="photo-main" data-index="'+i+'">На обложку</button>')+'</div>').join('')+(d.photos.length<10?'<button type="button" class="photo-add" data-action="photo-add">'+icon('plus')+'Добавить фото</button>':'')+'</div><input class="file-input" id="photo-files" type="file" accept="image/*" multiple><p class="help" style="margin-top:10px">Оригиналы фото сохраняются без обработки. До 10 фотографий.</p>';
@@ -352,7 +360,8 @@ async function saveItem(form){
  const raw=String(f.get('raw')||'').trim(),productKind=f.get('productKind')==='batch'?'batch':'single';
  const quantity=productKind==='batch'?(Number(f.get('quantity'))||null):null;
  const data={...(isNew?{}:item(draft.id)),id:isNew?uid():draft.id,status:isNew?'queue':draft.status,title:isNew?(raw.split(/[\n.!?]/)[0]||'Новое объявление').slice(0,50):String(f.get('title')||'').trim(),raw,description:isNew?'':String(f.get('description')||''),photos:draft.photos,price:f.get('price')===''?null:Number(f.get('price')),pickupMinutes:isNew?60:Number(f.get('pickupMinutes')),delivery:!isNew&&f.has('delivery'),productKind,condition:productKind==='single'?(f.get('condition')==='new'?'new':'used'):null,defects:String(f.get('defects')||'').trim(),quantity,generateCards:f.has('generateCards'),cardStyle:normalizeCardStyle(f.get('cardStyle')),cardFormat:normalizeCardFormat(f.get('cardFormat')),cardCount:Number(f.get('cardCount'))||1,updatedAt:new Date().toISOString()};
- if(data.pickupMinutes<15||data.pickupMinutes>480)throw Error('Укажите время получения от 15 до 480 минут');
+ if(!isNew&&draft.sourcePhotos)data.sourcePhotos=structuredClone(draft.photos);
+   if(data.pickupMinutes<15||data.pickupMinutes>480)throw Error('Укажите время получения от 15 до 480 минут');
  const event={id:uid(),type:'item.upsert',payload:normalItem(data)};
  if(isNew)clearTimeout(draftSaveTimer);
  await commit(s=>{const next=receiveEvent(s,event),saved=next.items.find(x=>x.id===data.id),signature=cardRequestKey(saved),previous=isNew?null:item(data.id)?.cardRequestKey;next.newDraft=null;if(signature!==previous){saved.cardRequestKey=signature;saved.cardRequestStatus=signature?'requested':null;}addOutbox(next,isNew?'item.created':'item.edited',{itemId:data.id,item:saved},listingMarkers(saved,isNew?'listing.create':'listing.update'));if(signature&&signature!==previous)addOutbox(next,'cards.requested',{itemId:data.id,item:saved,requestId:uid(),...cardSpec(saved),requestKey:signature,photoIds:saved.photos.map(p=>p.id)},{action:'cards.generate',listingId:data.id,cards:{...cardSpec(saved),requestKey:signature}});return next;});

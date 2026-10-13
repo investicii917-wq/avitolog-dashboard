@@ -32,7 +32,7 @@ const context=vm.createContext({...cards,...model,crypto:webcrypto,console,struc
  document:{getElementById:()=>fakeRoot},window:{addEventListener(){}},location:{hash:''},
  saveState:async()=>{},readState:async()=>model.blankState()});
 let source=fs.readFileSync(new URL('../public/app.js',import.meta.url),'utf8').replace(/^import .*;\r?\n/gm,'').replace(/\nboot\(\);\s*$/,'');
-source+='\nglobalThis.testApi={cardsHtml,mailboxManifest,applyMailboxEvent,sendMailboxEvent,restoreMailboxPhotos,connect:(c)=>{mailboxConnection=c},snapshot:mailboxSnapshot};';
+source+='\nglobalThis.testApi={cardsHtml,mailboxManifest,applyMailboxEvent,sendMailboxEvent,restoreMailboxPhotos,connect:(c)=>{mailboxConnection=c},snapshot:mailboxSnapshot,decodeMailboxJson,readMailboxJson};';
 vm.runInContext(source,context);
 const api=context.testApi;
 const html=api.cardsHtml(base);
@@ -70,5 +70,14 @@ api.applyMailboxEvent(second,{type:'cards.completed',payload:{...result,requestK
 check(JSON.stringify(second)===saved);
 const third=JSON.parse(JSON.stringify(api.snapshot(second))).state;
 check(third.items[0].cardStyle==='designer'&&third.items[0].cardFormat==='landscape'&&third.items[0].photos[0].preview);
+const cleanManifest=JSON.parse(api.mailboxManifest({...event,payload:{...event.payload,item:{...base,sourcePhotos:base.photos}}},['original.png']));
+check(!JSON.stringify(cleanManifest).includes('data:image'));
+context.fetch=async(url,options)=>({ok:true,text:async()=>JSON.stringify({big:true,text:'x'.repeat(1100000)})});
+const large=await api.decodeMailboxJson('state/site-state.json',{encoding:'none',content:''});
+check(large.big&&large.text.length===1100000);
+const small=await api.decodeMailboxJson('state/site-state.json',{encoding:'base64',content:Buffer.from(JSON.stringify({small:true})).toString('base64')});
+check(small.small);
+context.fetch=async()=>({ok:false,status:503});
+await assert.rejects(()=>api.decodeMailboxJson('state/site-state.json',{content:''}));checks++;
 console.log(JSON.stringify({passed:true,checks,transport:'in-memory GitHub Contents API; separate device state',liveGitHub:false}));
 
