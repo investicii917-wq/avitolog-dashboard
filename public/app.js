@@ -258,7 +258,7 @@ function detailPage(x){
  const dock=x.status==='ready'?link(icon('edit')+'Редактировать','/item/'+x.id+'/edit','btn')+btn('Опубликовать','publish','primary'):x.status==='archived'?btn('Вернуть в публикацию','restore-item','primary'):'';
  return page(x.title,x.status==='published'||x.status==='sold'?'/list/published':'/list/ready',main+publicationStats+prices+actions+desc+raw+bottom,dock);
 }
-function getDraft(id){const key=id||'new',fresh={photos:[],title:'',raw:'',description:'',price:null,pickupMinutes:60,delivery:false,productKind:'single',condition:'used',defects:'',quantity:1,generateCards:false,cardStyle:'realistic',cardFormat:'auto',cardCount:1};if(!draft||draft.key!==key){draft={key,...(id?structuredClone(item(id)):structuredClone(state?.newDraft||fresh))};if(id&&draft.sourcePhotos?.length)draft.photos=structuredClone(draft.sourcePhotos);}return draft;}
+function getDraft(id){const key=id||'new',fresh={photos:[],title:'',raw:'',description:'',price:null,pickupMinutes:60,delivery:false,productKind:'single',condition:'used',defects:'',quantity:1,generateCards:false,cardStyle:'realistic',cardFormat:'auto',cardCount:1};if(!draft||draft.key!==key){draft={key,...(id?structuredClone(item(id)):structuredClone(state?.newDraft||fresh))};if(id&&Array.isArray(draft.sourcePhotos))draft.photos=structuredClone(draft.sourcePhotos);}return draft;}
 function productFields(d){const kind=d.productKind==='batch'?'batch':'single',condition=d.condition==='new'?'new':'used';return '<section class="section product-section"><h2>Параметры товара</h2><div class="segmented" role="radiogroup" aria-label="Тип товара"><label><input type="radio" name="productKind" value="single" '+(kind==='single'?'checked':'')+'><span>Товар 1</span></label><label><input type="radio" name="productKind" value="batch" '+(kind==='batch'?'checked':'')+'><span>Товар тиражный</span></label></div><div class="product-single '+(kind==='single'?'':'is-hidden')+'"><div class="field-label">Состояние</div><div class="segmented condition" role="radiogroup" aria-label="Состояние"><label><input type="radio" name="condition" value="used" '+(condition==='used'?'checked':'')+'><span>Б/у</span></label><label><input type="radio" name="condition" value="new" '+(condition==='new'?'checked':'')+'><span>Новое</span></label></div></div><div class="product-batch '+(kind==='batch'?'':'is-hidden')+'">'+field('Количество штук','<input name="quantity" type="number" min="1" step="1" inputmode="numeric" value="'+(Number(d.quantity)||1)+'">','Укажите, сколько одинаковых единиц есть в наличии.')+'</div>'+field('Дефекты и нюансы','<textarea name="defects" rows="3" placeholder="Если есть — опишите честно. Это попадёт в обработку объявления.">'+esc(d.defects||'')+'</textarea>')+'</section>';}
 function cardsHtml(d){
  const enabled=!!d.generateCards,style=normalizeCardStyle(d.cardStyle),format=normalizeCardFormat(d.cardFormat),count=Math.max(1,Math.min(10,Number(d.cardCount)||1));
@@ -354,6 +354,12 @@ async function connectMailbox(form){
  unlocked=true;state=await readState();await syncMailboxState(true);queueMailboxSync();queueMailboxResultSync();render();
 }
 function inlineError(message){const el=document.getElementById('form-error');if(el)el.innerHTML='<p class="inline-error">'+esc(message)+'</p>';else toast(message);}
+function prepareCardRequest(saved,existing){
+ const signature=cardRequestKey(saved),previous=existing?.cardRequestKey??null;
+ if(signature!==previous){saved.cardRequestKey=signature;saved.cardRequestStatus=signature?'requested':null;saved.generatedCards=null;}
+ else if(existing?.generatedCards){saved.photos=structuredClone(existing.photos);}
+ return {signature,previous};
+}
 async function saveItem(form){
  if(photoBusy)throw Error('Дождитесь загрузки фотографий');
  const f=new FormData(form),isNew=draft.key==='new';
@@ -364,7 +370,7 @@ async function saveItem(form){
    if(data.pickupMinutes<15||data.pickupMinutes>480)throw Error('Укажите время получения от 15 до 480 минут');
  const event={id:uid(),type:'item.upsert',payload:normalItem(data)};
  if(isNew)clearTimeout(draftSaveTimer);
- await commit(s=>{const next=receiveEvent(s,event),saved=next.items.find(x=>x.id===data.id),signature=cardRequestKey(saved),previous=isNew?null:item(data.id)?.cardRequestKey;next.newDraft=null;if(signature!==previous){saved.cardRequestKey=signature;saved.cardRequestStatus=signature?'requested':null;}addOutbox(next,isNew?'item.created':'item.edited',{itemId:data.id,item:saved},listingMarkers(saved,isNew?'listing.create':'listing.update'));if(signature&&signature!==previous)addOutbox(next,'cards.requested',{itemId:data.id,item:saved,requestId:uid(),...cardSpec(saved),requestKey:signature,photoIds:saved.photos.map(p=>p.id)},{action:'cards.generate',listingId:data.id,cards:{...cardSpec(saved),requestKey:signature}});return next;});
+ await commit(s=>{const next=receiveEvent(s,event),saved=next.items.find(x=>x.id===data.id),{signature,previous}=prepareCardRequest(saved,isNew?null:item(data.id));next.newDraft=null;addOutbox(next,isNew?'item.created':'item.edited',{itemId:data.id,item:saved},listingMarkers(saved,isNew?'listing.create':'listing.update'));if(signature&&signature!==previous)addOutbox(next,'cards.requested',{itemId:data.id,item:saved,requestId:uid(),...cardSpec(saved),requestKey:signature,photoIds:saved.photos.map(p=>p.id)},{action:'cards.generate',listingId:data.id,cards:{...cardSpec(saved),requestKey:signature}});return next;});
  draft=null;go(isNew?'/list/ready':'/item/'+data.id);toast(isNew?'Объявление добавлено':'Изменения сохранены');
 }
 root.addEventListener('submit',async e=>{

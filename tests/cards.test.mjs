@@ -32,7 +32,7 @@ const context=vm.createContext({...cards,...model,crypto:webcrypto,console,struc
  document:{getElementById:()=>fakeRoot},window:{addEventListener(){}},location:{hash:''},
  saveState:async()=>{},readState:async()=>model.blankState()});
 let source=fs.readFileSync(new URL('../public/app.js',import.meta.url),'utf8').replace(/^import .*;\r?\n/gm,'').replace(/\nboot\(\);\s*$/,'');
-source+='\nglobalThis.testApi={cardsHtml,mailboxManifest,applyMailboxEvent,sendMailboxEvent,restoreMailboxPhotos,connect:(c)=>{mailboxConnection=c},snapshot:mailboxSnapshot,decodeMailboxJson,readMailboxJson};';
+source+='\nglobalThis.testApi={cardsHtml,mailboxManifest,applyMailboxEvent,sendMailboxEvent,restoreMailboxPhotos,connect:(c)=>{mailboxConnection=c},prepareCardRequest,snapshot:mailboxSnapshot,decodeMailboxJson,readMailboxJson};';
 vm.runInContext(source,context);
 const api=context.testApi;
 const html=api.cardsHtml(base);
@@ -79,5 +79,11 @@ const small=await api.decodeMailboxJson('state/site-state.json',{encoding:'base6
 check(small.small);
 context.fetch=async()=>({ok:false,status:503});
 await assert.rejects(()=>api.decodeMailboxJson('state/site-state.json',{content:''}));checks++;
+const unchanged=structuredClone(base),prior=second.items[0];
+api.prepareCardRequest(unchanged,prior);
+check(unchanged.photos[0].id==='p1');
+const changed={...structuredClone(base),raw:'Другой текст',generatedCards:{quality:'approved'}};
+const prepared=api.prepareCardRequest(changed,prior);
+check(prepared.signature!==prepared.previous&&changed.cardRequestStatus==='requested'&&changed.generatedCards===null);
 console.log(JSON.stringify({passed:true,checks,transport:'in-memory GitHub Contents API; separate device state',liveGitHub:false}));
 
