@@ -1,7 +1,7 @@
-import {CARD_STYLES,normalizeCardStyle,normalizeCardFormat,cardSpec,cardRequestKey,cardResultProblem} from './cards.js?v=1';
+import {CARD_STYLES,normalizeCardStyle,normalizeCardFormat,cardSpec,cardRequestKey,cardResultProblem} from './cards.js?v=2';
 
 import {readState,saveState} from './data.js?v=8';
-import {uid,todayKey,normalItem,receiveEvent,addSlot,addBooking,freeTimes,dayLoad,minutes} from './model.js?v=12';
+import {uid,todayKey,normalItem,receiveEvent,addSlot,addBooking,freeTimes,dayLoad,minutes} from './model.js?v=13';
 const root=document.getElementById('app');
 const CONNECTION_KEY='avitolog-mailbox-connection-v1';
 let state,unlocked=false,mailboxConnection=null,draft=null,galleryIndex=0,toastTimer,photoBusy=false,commitQueue=Promise.resolve(),mailboxSyncing=false,mailboxSyncTimer,mailboxResultSyncing=false,mailboxResultTimer,mailboxStateTimer,mailboxStateSyncing=false,calendarReturnPath='/analytics';
@@ -23,6 +23,27 @@ const money=n=>n==null?'Цена не указана':new Intl.NumberFormat('ru-
 const statusName={queue:'Ожидает обработки',ready:'Готово к публикации',published:'Опубликовано',sold:'Продано',archived:'В архиве'};
 const item=id=>state.items.find(x=>x.id===id);
 const mediaSrc=photo=>photo?.src||photo?.preview||'';
+const activeCardPhotos=record=>record?.sourcePhotos?.length?record.sourcePhotos:(record?.photos||[]);
+const photoIds=photos=>(photos||[]).map(photo=>photo.id).join('|');
+const samePhotos=(left,right)=>photoIds(left)===photoIds(right);
+function rememberPhotoSet(record,photos,label,kind){
+ const saved=structuredClone(photos||[]);
+ if(!saved.length)return;
+ record.imageHistory??=[];
+ if(record.imageHistory.some(group=>photoIds(group.photos)===photoIds(saved)))return;
+ record.imageHistory.unshift({id:uid(),label,kind,createdAt:new Date().toISOString(),photos:saved});
+}
+function rememberImageSet(record,label,kind){rememberPhotoSet(record,record.photos,label,kind);}
+function availableImageHistory(record){
+ const source=record?.sourcePhotos?.length?[{id:'source-images',label:'Исходные фотографии',kind:'source',createdAt:record.updatedAt||record.createdAt,photos:record.sourcePhotos}]:[];
+ return [...source,...(record?.imageHistory||[])];
+}
+function cardInputItem(record){
+ const copy=structuredClone(record);
+ copy.photos=structuredClone(activeCardPhotos(record));
+ delete copy.sourcePhotos;delete copy.imageHistory;delete copy.defects;
+ return copy;
+}
 const shortDate=d=>new Date(d+'T12:00:00').toLocaleDateString('ru-RU',{day:'numeric',month:'long'});
 const fullDate=d=>new Date(d+'T12:00:00').toLocaleDateString('ru-RU',{day:'numeric',month:'long',weekday:'long'});
 const stamp=d=>new Date(d).toLocaleString('ru-RU',{timeZone:'Europe/Moscow',day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'});
@@ -48,8 +69,10 @@ async function mailboxRequest(path,options={}){
 }
 function fileExtension(photo){const type=String(photo.type||'').toLowerCase();if(type.includes('png'))return 'png';if(type.includes('webp'))return 'webp';if(type.includes('gif'))return 'gif';return 'jpg';}
 function mailboxManifest(task,attachmentNames){
- const payload=structuredClone(task.payload||{}),photos=payload?.item?.photos;
- if(Array.isArray(photos))payload.item.photos=photos.map((photo,index)=>({id:photo.id,name:photo.name||('photo-'+(index+1)),type:photo.type||'image/jpeg',file:attachmentNames[index]||null}));
+ const payload=structuredClone(task.payload||{}),photos=task.type==='cards.requested'?payload?.sourcePhotos:payload?.item?.photos;
+ const manifestPhotos=Array.isArray(photos)?photos.map((photo,index)=>({id:photo.id,name:photo.name||('photo-'+(index+1)),type:photo.type||'image/jpeg',file:attachmentNames[index]||null})):[];
+ if(task.type==='cards.requested'){payload.sourcePhotos=manifestPhotos;if(payload.item)payload.item.photos=manifestPhotos;}
+ else if(Array.isArray(photos))payload.item.photos=manifestPhotos;
  if(payload.item)delete payload.item.sourcePhotos;
  return JSON.stringify({schema:'avitolog.mailbox.v1',id:task.id,type:task.type,createdAt:task.createdAt,payload,markers:task.markers||{},attachments:attachmentNames},null,2);
 }
@@ -80,7 +103,8 @@ function mergeMailboxStates(remote,local){
 function mailboxSnapshot(source){
  const copy=structuredClone(source);
  copy.outbox=[];copy.eventIds=[];copy.importedMailboxInbox=[];copy.processedMailboxResults=[];copy.newDraft=null;
- copy.items=(copy.items||[]).map(x=>({...x,photos:(x.photos||[]).map(p=>({...p,src:null,preview:p.preview||p.src||null}))}));
+ const compactPhotos=photos=>(photos||[]).map(p=>({...p,src:null,preview:p.preview||p.src||null}));
+ copy.items=(copy.items||[]).map(x=>({...x,photos:compactPhotos(x.photos),sourcePhotos:compactPhotos(x.sourcePhotos),imageHistory:(x.imageHistory||[]).map(group=>({...group,photos:compactPhotos(group.photos)}))}));
  return {schema:'avitolog.state.v1',savedAt:new Date().toISOString(),state:copy};
 }
 async function syncMailboxState(loadOnly=false){
@@ -103,7 +127,7 @@ async function syncMailboxState(loadOnly=false){
  }catch{}finally{mailboxStateSyncing=false;}
 }
 async function sendMailboxEvent(task){
- const prefix=String(task.createdAt||new Date().toISOString()).replace(/\D/g,'').slice(0,14)+'-'+String(task.id).replace(/[^a-zA-Z0-9-]/g,''),photos=['item.created','item.edited','cards.requested'].includes(task.type)&&Array.isArray(task.payload?.item?.photos)?task.payload.item.photos:[],attachmentNames=photos.map(()=>null);
+ const prefix=String(task.createdAt||new Date().toISOString()).replace(/\D/g,'').slice(0,14)+'-'+String(task.id).replace(/[^a-zA-Z0-9-]/g,''),photos=task.type==='cards.requested'?task.payload?.sourcePhotos:(['item.created','item.edited'].includes(task.type)?task.payload?.item?.photos:[]),attachmentNames=(photos||[]).map(()=>null);
  for(let index=0;index<photos.length;index++){
   const photo=photos[index],encoded=dataUriBase64(photo.src||photo.preview),extension=fileExtension(photo);
   if(!encoded)continue;
@@ -154,7 +178,8 @@ function mergeRemoteItem(s,source,photos){
  if(!source?.id||s.deletedMailboxItemIds?.includes(source.id))return;
  const index=s.items.findIndex(x=>x.id===source.id),old=index>=0?s.items[index]:{};
  if(index>=0&&itemTime(old)>itemTime(source))return;
- const next=normalItem({...old,...source,photos:photos?.length?photos:(source.photos||old.photos||[])});
+ const resolvedPhotos=photos?.length?photos:(source.photos||old.photos||[]);
+ const next=normalItem({...old,...source,photos:resolvedPhotos,sourcePhotos:source.sourcePhotos?.length?(photos?.length?structuredClone(photos):source.sourcePhotos):(old.sourcePhotos||[])});
  if(index>=0)s.items[index]=next;else s.items.unshift(next);
 }
 function applyMailboxEvent(s,event,photos=[]){
@@ -163,10 +188,12 @@ function applyMailboxEvent(s,event,photos=[]){
   const record=s.items.find(x=>x.id===p.itemId),problem=cardResultProblem(record,{...p,photos:photos.length?photos:p.photos});
   if(problem)return;
   if(!photos.length||photos.some(p=>!p.src))throw Error('Файлы карточек ещё не получены');
-  record.sourcePhotos??=structuredClone(record.photos||[]);
+  if(!record.sourcePhotos?.length)record.sourcePhotos=structuredClone(record.photos||[]);
+  rememberImageSet(record,record.generatedCards?'Предыдущая серия карточек':'Исходные фотографии',record.generatedCards?'generated':'source');
   record.photos=photos.length?photos:p.photos;record.generatedCards={style:p.style,aspectRatio:p.aspectRatio,requestKey:p.requestKey,quality:p.quality||'review-required'};
   record.cardRequestStatus='completed';record.updatedAt=event.createdAt;return;
  }
+ if(event?.type==='cards.requested')return;
 
  if(event?.type==='listing.ready'){
   const source=event.item||remote||{id:event.itemId,status:'queue',photos:event.photos||[]};
@@ -179,6 +206,7 @@ function applyMailboxEvent(s,event,photos=[]){
  if(event?.type==='item.status'&&p.itemId){const x=s.items.find(v=>v.id===p.itemId);if(x&&['queue','ready','published','sold','archived'].includes(p.status)){x.status=p.status;if(p.status==='archived')x.archivedAt=p.archivedAt||new Date().toISOString();else delete x.archivedAt;}return;}
  if(event?.type==='item.publish'&&p.itemId){const x=s.items.find(v=>v.id===p.itemId);if(x){x.status='published';delete x.archivedAt;}return;}
  if(event?.type==='item.comment'&&p.itemId&&p.comment){const x=s.items.find(v=>v.id===p.itemId);if(x){x.comments??=[];const i=x.comments.findIndex(v=>v.id===p.comment.id);if(i<0)x.comments.push(p.comment);else x.comments[i]=p.comment;}return;}
+ if(event?.type==='cards.comment'&&p.itemId&&p.comment){const x=s.items.find(v=>v.id===p.itemId);if(x){x.cardComments??=[];const i=x.cardComments.findIndex(v=>v.id===p.comment.id);if(i<0)x.cardComments.push(p.comment);else x.cardComments[i]=p.comment;}return;}
  if(event?.type==='offer.upsert'||event?.type==='chat.upsert'){try{receiveEvent(s,event);}catch{}return;}
  if(event?.type==='calendar.slot.opened'&&p.slot?.id){if(!s.slots.some(x=>x.id===p.slot.id))s.slots.push(p.slot);return;}
  if(event?.type==='calendar.slot.removed'&&p.slotId){s.slots=s.slots.filter(x=>x.id!==p.slotId);s.bookings=s.bookings.filter(x=>x.slotId!==p.slotId);return;}
@@ -246,8 +274,13 @@ function gallery(x){
  if(!visible.length)return '<div class="gallery gallery-empty">'+icon('photo')+'Фотографии переданы в обработку</div>';
  return '<div class="gallery"><div class="gallery-track" id="gallery-track">'+visible.map((p,i)=>'<figure><img src="'+esc(mediaSrc(p))+'" alt="'+esc(x.title)+' — фото '+(i+1)+'"></figure>').join('')+'</div>'+(visible.length>1?'<button class="gallery-arrow left" data-action="gallery-prev" aria-label="Предыдущее фото">'+icon('back')+'</button><button class="gallery-arrow right" data-action="gallery-next" aria-label="Следующее фото">'+icon('next')+'</button>':'')+'<span class="gallery-counter" id="gallery-counter">1 / '+visible.length+'</span></div>'+(visible.length>1?'<div class="gallery-thumbs" aria-label="Фотографии">'+visible.map((p,i)=>'<button data-action="gallery-at" data-index="'+i+'" aria-label="Фото '+(i+1)+'"><img src="'+esc(mediaSrc(p))+'" alt=""></button>').join('')+'</div>':'');
 }
+function visualReviewPanel(x){
+ if(!x.photos?.length)return section('<h2>Карточки товара</h2><p>Фотографий пока нет. Добавьте исходники и выберите оформление.</p>'+link(icon('plus')+'Настроить карточки'+icon('next'),'/item/'+x.id+'/edit','btn outline block action-link'));
+ const note=x.generatedCards?.quality==='design-preview'?'<p class="help">Проверка оформления: изображения демонстрационные. Надписи на товаре требуют исправления перед публикацией.</p>':'';
+ return section(note+link(icon('comment')+'Добавить комментарий по фото'+icon('next'),'/item/'+x.id+'/cards-comment','btn outline block action-link'),'visual-review');
+}
 function detailPage(x){
- const main=gallery(x)+(x.generatedCards?.quality==='design-preview'?section('<p class="help">Проверка оформления: изображения демонстрационные. Надписи на товаре требуют исправления перед публикацией.</p>'):'')+section('<span class="tag">'+statusName[x.status]+'</span><h1 class="detail-title">'+esc(x.title)+'</h1><div class="detail-price">'+money(x.price)+'</div><div class="facts"><div><span>Самовывоз</span><b>'+x.pickupMinutes+' мин на получение</b></div><div><span>Доставка</span><b>'+(x.delivery?'Можно обсудить':'Не предусмотрена')+'</b></div></div>');
+ const main=gallery(x)+visualReviewPanel(x)+section('<span class="tag">'+statusName[x.status]+'</span><h1 class="detail-title">'+esc(x.title)+'</h1><div class="detail-price">'+money(x.price)+'</div><div class="facts"><div><span>Самовывоз</span><b>'+x.pickupMinutes+' мин на получение</b></div><div><span>Доставка</span><b>'+(x.delivery?'Можно обсудить':'Не предусмотрена')+'</b></div></div>');
  const stats=x.stats||{},publicationStats=(x.status==='published'||x.status==='archived')?section('<h2>Статистика объявления</h2><div class="stats-grid"><div>'+icon('eye')+'<span>Просмотры</span><b>'+Number(stats.views||0)+'</b></div><div>'+icon('heart')+'<span>В избранном</span><b>'+Number(stats.favorites||0)+'</b></div><div>'+icon('comment')+'<span>Обращения</span><b>'+Number(stats.contacts||0)+'</b></div><div>'+icon('box')+'<span>Предложения</span><b>'+(x.offers||[]).length+'</b></div></div>'):'';
  const actions=x.status==='published'?section('<div class="actions-stack">'+link(icon('comment')+'Написавшие <span class="count">'+(x.chats||[]).length+'</span>'+icon('next'),'/item/'+x.id+'/writers','btn outline')+link(icon('comment')+'Предложения <span class="count">'+x.offers.length+'</span>'+icon('next'),'/item/'+x.id+'/offers','btn accent')+'</div>'):'';
  const prices=x.status==='ready'?section('<h2>Цена продажи</h2><div class="price-choices">'+[['Быстрая',x.fast],['Оптимальная',x.optimal],['Долгая',x.slow]].map(([label,p])=>'<button class="price-choice '+(p===x.price?'active':'')+'" data-action="set-price" data-price="'+(p??'')+'" '+(p==null?'disabled':'')+'><small>'+label+'</small><b>'+money(p)+'</b></button>').join('')+'</div><form id="price-form" class="field"><label for="own-price">Своя цена, ₽</label><div class="inline-form"><input id="own-price" name="price" type="number" inputmode="numeric" min="0" max="1000000000" value="'+(x.price??'')+'" required><button class="btn">Сохранить</button></div></form>'):'';
@@ -258,19 +291,26 @@ function detailPage(x){
  const dock=x.status==='ready'?link(icon('edit')+'Редактировать','/item/'+x.id+'/edit','btn')+btn('Опубликовать','publish','primary'):x.status==='archived'?btn('Вернуть в публикацию','restore-item','primary'):'';
  return page(x.title,x.status==='published'||x.status==='sold'?'/list/published':'/list/ready',main+publicationStats+prices+actions+desc+raw+bottom,dock);
 }
-function getDraft(id){const key=id||'new',fresh={photos:[],title:'',raw:'',description:'',price:null,pickupMinutes:60,delivery:false,productKind:'single',condition:'used',defects:'',quantity:1,generateCards:false,cardStyle:'realistic',cardFormat:'auto',cardCount:1};if(!draft||draft.key!==key){draft={key,...(id?structuredClone(item(id)):structuredClone(state?.newDraft||fresh))};if(id&&Array.isArray(draft.sourcePhotos))draft.photos=structuredClone(draft.sourcePhotos);}return draft;}
-function productFields(d){const kind=d.productKind==='batch'?'batch':'single',condition=d.condition==='new'?'new':'used';return '<section class="section product-section"><h2>Параметры товара</h2><div class="segmented" role="radiogroup" aria-label="Тип товара"><label><input type="radio" name="productKind" value="single" '+(kind==='single'?'checked':'')+'><span>Товар 1</span></label><label><input type="radio" name="productKind" value="batch" '+(kind==='batch'?'checked':'')+'><span>Товар тиражный</span></label></div><div class="product-single '+(kind==='single'?'':'is-hidden')+'"><div class="field-label">Состояние</div><div class="segmented condition" role="radiogroup" aria-label="Состояние"><label><input type="radio" name="condition" value="used" '+(condition==='used'?'checked':'')+'><span>Б/у</span></label><label><input type="radio" name="condition" value="new" '+(condition==='new'?'checked':'')+'><span>Новое</span></label></div></div><div class="product-batch '+(kind==='batch'?'':'is-hidden')+'">'+field('Количество штук','<input name="quantity" type="number" min="1" step="1" inputmode="numeric" value="'+(Number(d.quantity)||1)+'">','Укажите, сколько одинаковых единиц есть в наличии.')+'</div>'+field('Дефекты и нюансы','<textarea name="defects" rows="3" placeholder="Если есть — опишите честно. Это попадёт в обработку объявления.">'+esc(d.defects||'')+'</textarea>')+'</section>';}
+function getDraft(id){const key=id||'new',fresh={photos:[],sourcePhotos:[],imageHistory:[],title:'',raw:'',description:'',price:null,pickupMinutes:60,delivery:false,productKind:'single',condition:'used',defects:'',quantity:1,generateCards:false,cardStyle:'realistic',cardFormat:'auto',cardCount:1};if(!draft||draft.key!==key){draft={key,...(id?structuredClone(item(id)):structuredClone(state?.newDraft||fresh))};}return draft;}
+function productFields(d){const kind=d.productKind==='batch'?'batch':'single',condition=d.condition==='new'?'new':'used';return '<section class="section product-section"><h2>Параметры товара</h2><div class="segmented" role="radiogroup" aria-label="Тип товара"><label><input type="radio" name="productKind" value="single" '+(kind==='single'?'checked':'')+'><span>Товар 1</span></label><label><input type="radio" name="productKind" value="batch" '+(kind==='batch'?'checked':'')+'><span>Товар тиражный</span></label></div><div class="product-single '+(kind==='single'?'':'is-hidden')+'"><div class="field-label">Состояние</div><div class="segmented condition" role="radiogroup" aria-label="Состояние"><label><input type="radio" name="condition" value="used" '+(condition==='used'?'checked':'')+'><span>Б/у</span></label><label><input type="radio" name="condition" value="new" '+(condition==='new'?'checked':'')+'><span>Новое</span></label></div></div><div class="product-batch '+(kind==='batch'?'':'is-hidden')+'">'+field('Количество штук','<input name="quantity" type="number" min="1" step="1" inputmode="numeric" value="'+(Number(d.quantity)||1)+'">','Укажите, сколько одинаковых единиц есть в наличии.')+'</div>'+field('Дефекты и нюансы','<textarea name="defects" rows="3" placeholder="Если есть — опишите честно. Не попадёт в описание и карточки.">'+esc(d.defects||'')+'</textarea>')+'</section>';}
 function cardsHtml(d){
  const enabled=!!d.generateCards,style=normalizeCardStyle(d.cardStyle),format=normalizeCardFormat(d.cardFormat),count=Math.max(1,Math.min(10,Number(d.cardCount)||1));
  const options=Object.entries(CARD_STYLES).map(([key,value])=>'<label class="card-style-option"><input type="radio" name="cardStyle" value="'+key+'" '+(style===key?'checked':'')+'><span><b>'+value.label+'</b><small>'+value.description+'</small></span></label>').join('');
  const formats=[['auto','Подобрать по товару'],['landscape','Горизонтальные · 4:3'],['portrait','Вертикальные · 3:4']].map(([key,label])=>'<option value="'+key+'" '+(format===key?'selected':'')+'>'+label+'</option>').join('');
- return '<section class="section cards-section"><label class="switch-row card-switch"><span><b>Создать карточки</b><small>Выберите оформление и количество изображений</small></span><input type="checkbox" name="generateCards" data-action="cards-toggle" '+(enabled?'checked':'')+'></label><div id="cards-config" class="cards-config '+(enabled?'':'is-hidden')+'"><div class="divider"></div><h2>Оформление</h2><p class="help"><a href="./card-examples/" target="_blank" rel="noopener">Посмотреть примеры оформления</a></p><div class="card-style-options">'+options+'</div>'+field('Формат всей серии','<select name="cardFormat">'+formats+'</select>','Все изображения одного товара будут в одном формате.')+field('Количество карточек','<input name="cardCount" type="number" min="1" max="10" step="1" inputmode="numeric" value="'+count+'">','<span id="card-count-note">В серии '+plural(count,'карточка','карточки','карточек')+'.</span>')+'<p class="help">Преимущества для дизайнерских карточек берём из описания и ваших заметок. Сам товар и его состояние сохраняем.</p></div></section>';
+ return '<section class="section cards-section"><label class="switch-row card-switch"><span><b>Создать карточки</b><small>Выберите оформление и количество изображений</small></span><input type="checkbox" name="generateCards" data-action="cards-toggle" '+(enabled?'checked':'')+'></label><div id="cards-config" class="cards-config '+(enabled?'':'is-hidden')+'"><div class="divider"></div><h2>Оформление</h2><p class="help"><a href="./card-examples/" target="_blank" rel="noopener">Посмотреть примеры оформления</a></p><div class="card-style-options">'+options+'</div>'+field('Формат всей серии','<select name="cardFormat">'+formats+'</select>','Все изображения одного товара будут в одном формате.')+field('Количество карточек','<input name="cardCount" type="number" min="1" max="10" step="1" inputmode="numeric" value="'+count+'">','<span id="card-count-note">В серии '+plural(count,'карточка','карточки','карточек')+'.</span>')+'<p class="help">Карточки строятся только по описанию и фотографиям. «Дефекты и нюансы» в изображения и описание не передаются.</p></div></section>';
+}
+function imageHistoryHtml(d){
+ const groups=availableImageHistory(d).filter(group=>group.photos?.some(mediaSrc));
+ if(!groups.length)return '';
+ return '<details class="image-history"><summary>Добавить из истории</summary><p class="help">Верните отдельные исходники или прошлые варианты карточек.</p>'+groups.map(group=>'<div class="history-set"><b>'+esc(group.label||'Набор изображений')+'</b><div class="history-photos">'+group.photos.map(photo=>mediaSrc(photo)?'<button type="button" data-action="history-add" data-history="'+esc(group.id)+'" data-photo="'+esc(photo.id)+'" aria-label="Добавить изображение из истории"><img src="'+esc(mediaSrc(photo))+'" alt=""></button>':'').join('')+'</div></div>').join('')+'</details>';
 }
 function photosHtml(d){
- return '<div class="photo-editor-head"><b>Фотографии</b><span class="meta">'+d.photos.length+' / 10</span></div><div class="photo-grid">'+d.photos.map((p,i)=>'<div class="photo-tile"><img src="'+esc(p.src)+'" alt="Фото '+(i+1)+'"><button type="button" class="remove" data-action="photo-remove" data-index="'+i+'" aria-label="Удалить фото '+(i+1)+'">'+icon('close')+'</button>'+(i===0?'<span class="photo-order">Главное</span>':'<button type="button" class="photo-main" data-action="photo-main" data-index="'+i+'">На обложку</button>')+'</div>').join('')+(d.photos.length<10?'<button type="button" class="photo-add" data-action="photo-add">'+icon('plus')+'Добавить фото</button>':'')+'</div><input class="file-input" id="photo-files" type="file" accept="image/*" multiple><p class="help" style="margin-top:10px">Оригиналы фото сохраняются без обработки. До 10 фотографий.</p>';
+ const tiles=d.photos.map((p,i)=>'<div class="photo-tile"><img src="'+esc(mediaSrc(p))+'" alt="Фото '+(i+1)+'"><button type="button" class="remove" data-action="photo-remove" data-index="'+i+'" aria-label="Удалить фото '+(i+1)+'">'+icon('close')+'</button>'+(i===0?'<span class="photo-order">Главное</span>':'<button type="button" class="photo-main" data-action="photo-main" data-index="'+i+'">На обложку</button>')+'</div>').join('');
+ return '<div class="photo-editor-head"><b>Фотографии</b><span class="meta">'+d.photos.length+' / 10</span></div><div class="photo-grid">'+tiles+(d.photos.length<10?'<button type="button" class="photo-add" data-action="photo-add">'+icon('plus')+'Добавить фото</button>':'')+'</div><input class="file-input" id="photo-files" type="file" accept="image/*" multiple>'+imageHistoryHtml(d)+'<p class="help" style="margin-top:10px">Можно удалять, менять порядок и добавлять текущие изображения. До 10 фотографий.</p>';
 }
 function editPage(id){const d=getDraft(id),isNew=!id,back=isNew?'/list/ready':'/item/'+id;let fields=isNew?field('Что знаете о товаре','<textarea name="raw" rows="7" placeholder="Состояние, комплект, история…">'+esc(d.raw)+'</textarea>'):field('Заголовок','<input name="title" maxlength="50" required value="'+esc(d.title)+'">','До 50 символов')+field('Исходные заметки','<textarea name="raw" rows="5">'+esc(d.raw)+'</textarea>')+field('Описание объявления','<textarea name="description" rows="9">'+esc(d.description)+'</textarea>');fields+=field(isNew?'Желаемая цена, ₽':'Цена, ₽','<input name="price" type="number" min="0" max="1000000000" inputmode="numeric" value="'+(d.price??'')+'" placeholder="Необязательно">');if(!isNew)fields+=field('Время на получение, минут','<input name="pickupMinutes" type="number" inputmode="numeric" min="15" max="480" step="5" required value="'+d.pickupMinutes+'">','Учтите осмотр, разборку и вынос.')+'<label class="switch-row">Доставку можно обсудить<input name="delivery" type="checkbox" '+(d.delivery?'checked':'')+'></label>';return page(isNew?'Новое объявление':'Редактирование',back,'<form id="item-form">'+section('<div id="photo-editor">'+photosHtml(d)+'</div>')+section(fields)+cardsHtml(d)+productFields(d)+'<div id="form-error" aria-live="polite"></div></form>'+(isNew?section(btn('Удалить черновик','delete-draft','danger block'),'delete-zone'):''),'<button class="btn primary" type="submit" form="item-form">'+(isNew?'Добавить объявление':'Сохранить изменения')+'</button>',true);}
-function commentsPage(x){return page('Комментарий для ИИ','/item/'+x.id,section('<h2>'+esc(x.title)+'</h2><p>Укажите, что нужно изменить, уточнить или учесть при обработке.</p><form id="comment-form">'+field('Комментарий','<textarea name="text" rows="6" required placeholder="Например: учесть царапины на корпусе и самовывоз вдвоём…"></textarea>')+'</form>')+section('<h2>Комментарии</h2>'+(x.comments.length?x.comments.slice().reverse().map(c=>'<div class="comment">'+esc(c.text)+'<small>'+stamp(c.createdAt)+' · Сохранён для обработки</small></div>').join(''):'<p>Комментариев пока нет.</p>')),'<button class="btn primary" form="comment-form" type="submit">Сохранить комментарий</button>');}
+function commentsPage(x){return page('Комментарий для ИИ','/item/'+x.id,section('<h2>'+esc(x.title)+'</h2><p>Укажите, что нужно изменить, уточнить или учесть при обработке текста объявления.</p><form id="comment-form">'+field('Комментарий','<textarea name="text" rows="6" required placeholder="Например: уточнить комплект и самовывоз…"></textarea>')+'</form>')+section('<h2>Комментарии</h2>'+((x.comments||[]).length?x.comments.slice().reverse().map(c=>'<div class="comment">'+esc(c.text)+'<small>'+stamp(c.createdAt)+' · Сохранён для обработки</small></div>').join(''):'<p>Комментариев пока нет.</p>')),'<button class="btn primary" form="comment-form" type="submit">Сохранить комментарий</button>');}
+function cardCommentsPage(x){const comments=x.cardComments||[];return page('Комментарий по фото','/item/'+x.id,section('<h2>'+esc(x.title)+'</h2><p>Этот комментарий относится только к фотографиям и карточкам товара. Текст объявления не меняется.</p><form id="card-comment-form">'+field('Что исправить на фото','<textarea name="text" rows="6" required placeholder="Например: показать клавиши крупнее, не менять цвет товара…"></textarea>')+'</form>')+section('<h2>История комментариев по фото</h2>'+(comments.length?comments.slice().reverse().map(c=>'<div class="comment">'+esc(c.text)+'<small>'+stamp(c.createdAt)+' · Сохранён для обработки карточек</small></div>').join(''):'<p>Комментариев по фото пока нет.</p>')),'<button class="btn primary" form="card-comment-form" type="submit">Отправить комментарий по фото</button>');}
 function writersPage(x){
  const chats=(x.chats||[]).slice().sort((a,b)=>String(b.updatedAt||'').localeCompare(String(a.updatedAt||'')));
  return page('Написавшие','/item/'+x.id,section('<h2>'+esc(x.title)+'</h2><p>Только текстовые переписки по этому объявлению.</p>')+(chats.length?'<div class="list chat-list">'+chats.map(c=>link('<div class="chat-avatar">'+esc((c.buyer||'П').trim().slice(0,1).toUpperCase())+'</div><div class="row-info"><div class="row-title">'+esc(c.buyer||'Покупатель')+'</div><div class="row-sub">'+esc(c.preview||c.messages?.at(-1)?.text||'Открыть переписку')+'</div></div><div class="chat-time">'+(c.updatedAt?stamp(c.updatedAt):'')+'</div>','/item/'+x.id+'/chat/'+c.id,'item-row')).join('')+'</div>':section('<p>Переписок пока нет. Они появятся здесь, когда обработчик передаст текстовые сообщения из Авито.</p>')));
@@ -328,7 +368,7 @@ function render(){
  else if(parts[0]==='slot')root.innerHTML=parts[1]==='new'?slotEditor(params):schedulePage(parts[1]);
  else if(parts[0]==='item'){
  const x=item(parts[1]);
- root.innerHTML=!x?missing():parts[2]==='edit'?editPage(x.id):parts[2]==='comments'?commentsPage(x):parts[2]==='offers'?offersPage(x):parts[2]==='writers'?writersPage(x):parts[2]==='chat'?chatPage(x,parts[3]):parts[2]==='book'?bookingPage(x,parts[3],params):detailPage(x);
+ root.innerHTML=!x?missing():parts[2]==='edit'?editPage(x.id):parts[2]==='comments'?commentsPage(x):parts[2]==='cards-comment'?cardCommentsPage(x):parts[2]==='offers'?offersPage(x):parts[2]==='writers'?writersPage(x):parts[2]==='chat'?chatPage(x,parts[3]):parts[2]==='book'?bookingPage(x,parts[3],params):detailPage(x);
  }else root.innerHTML=listPage(parts[1]||'queue');
  }catch(e){root.innerHTML=page('Не удалось открыть страницу','/list/queue',section('<p>'+esc(e.message)+'</p>'));}
  const track=document.getElementById('gallery-track');
@@ -366,11 +406,14 @@ async function saveItem(form){
  const raw=String(f.get('raw')||'').trim(),productKind=f.get('productKind')==='batch'?'batch':'single';
  const quantity=productKind==='batch'?(Number(f.get('quantity'))||null):null;
  const data={...(isNew?{}:item(draft.id)),id:isNew?uid():draft.id,status:isNew?'queue':draft.status,title:isNew?(raw.split(/[\n.!?]/)[0]||'Новое объявление').slice(0,50):String(f.get('title')||'').trim(),raw,description:isNew?'':String(f.get('description')||''),photos:draft.photos,price:f.get('price')===''?null:Number(f.get('price')),pickupMinutes:isNew?60:Number(f.get('pickupMinutes')),delivery:!isNew&&f.has('delivery'),productKind,condition:productKind==='single'?(f.get('condition')==='new'?'new':'used'):null,defects:String(f.get('defects')||'').trim(),quantity,generateCards:f.has('generateCards'),cardStyle:normalizeCardStyle(f.get('cardStyle')),cardFormat:normalizeCardFormat(f.get('cardFormat')),cardCount:Number(f.get('cardCount'))||1,updatedAt:new Date().toISOString()};
- if(!isNew&&draft.sourcePhotos)data.sourcePhotos=structuredClone(draft.photos);
+ const existing=isNew?null:item(draft.id);
+ const changedPhotos=!isNew&&!samePhotos(existing?.photos,draft.photos);
+ if(isNew)data.sourcePhotos=structuredClone(draft.photos);
+ else if(changedPhotos){if(existing?.sourcePhotos?.length)rememberPhotoSet(data,existing.sourcePhotos,'Предыдущие исходники','source');data.sourcePhotos=structuredClone(draft.photos);}else data.sourcePhotos=structuredClone(existing?.sourcePhotos||[]);
    if(data.pickupMinutes<15||data.pickupMinutes>480)throw Error('Укажите время получения от 15 до 480 минут');
  const event={id:uid(),type:'item.upsert',payload:normalItem(data)};
  if(isNew)clearTimeout(draftSaveTimer);
- await commit(s=>{const next=receiveEvent(s,event),saved=next.items.find(x=>x.id===data.id),{signature,previous}=prepareCardRequest(saved,isNew?null:item(data.id));next.newDraft=null;addOutbox(next,isNew?'item.created':'item.edited',{itemId:data.id,item:saved},listingMarkers(saved,isNew?'listing.create':'listing.update'));if(signature&&signature!==previous)addOutbox(next,'cards.requested',{itemId:data.id,item:saved,requestId:uid(),...cardSpec(saved),requestKey:signature,photoIds:saved.photos.map(p=>p.id)},{action:'cards.generate',listingId:data.id,cards:{...cardSpec(saved),requestKey:signature}});return next;});
+ await commit(s=>{const next=receiveEvent(s,event),saved=next.items.find(x=>x.id===data.id),{signature,previous}=prepareCardRequest(saved,isNew?null:item(data.id));next.newDraft=null;addOutbox(next,isNew?'item.created':'item.edited',{itemId:data.id,item:saved},listingMarkers(saved,isNew?'listing.create':'listing.update'));if(signature&&signature!==previous)addOutbox(next,'cards.requested',{itemId:data.id,item:cardInputItem(saved),sourcePhotos:structuredClone(activeCardPhotos(saved)),requestId:uid(),...cardSpec(saved),requestKey:signature,photoIds:activeCardPhotos(saved).map(p=>p.id)},{action:'cards.generate',listingId:data.id,cards:{...cardSpec(saved),requestKey:signature}});return next;});
  draft=null;go(isNew?'/list/ready':'/item/'+data.id);toast(isNew?'Объявление добавлено':'Изменения сохранены');
 }
 root.addEventListener('submit',async e=>{
@@ -385,6 +428,11 @@ root.addEventListener('submit',async e=>{
  const itemId=route().parts[1];
   await commit(s=>{const comment={id:uid(),text,createdAt:new Date().toISOString()};const record=s.items.find(x=>x.id===itemId);record.comments.push(comment);record.updatedAt=new Date().toISOString();addOutbox(s,'item.comment',{itemId,comment,item:record},{action:'listing.comment',listingId:itemId});return s;});
  render();toast('Комментарий сохранён для обработки');
+ }else if(id==='card-comment-form'){
+ const text=String(f.get('text')||'').trim();if(!text)throw Error('Напишите комментарий по фото');
+ const itemId=route().parts[1];
+ await commit(s=>{const comment={id:uid(),text,createdAt:new Date().toISOString(),scope:'cards'};const record=s.items.find(x=>x.id===itemId);record.cardComments??=[];record.cardComments.push(comment);record.updatedAt=new Date().toISOString();addOutbox(s,'cards.comment',{itemId,comment},{action:'cards.comment',listingId:itemId,photos:(record.photos||[]).map(p=>p.id)});return s;});
+ render();toast('Комментарий по фото отправлен в обработку');
  }else if(id==='slot-form'){
  const p={...Object.fromEntries(f),id:uid(),kind:'pickup',updatedAt:new Date().toISOString()};await commit(s=>{const next=addSlot(s,p);addOutbox(next,'calendar.slot.opened',{slot:next.slots.find(x=>x.id===p.id)},{action:'calendar.slot.open',slotId:p.id});return next;});go('/calendar?month='+p.date.slice(0,7)+'&day='+p.date);toast('Время открыто');
  }else if(id==='booking-form'){
@@ -408,6 +456,7 @@ root.addEventListener('click',async e=>{
  if(action==='photo-add'){document.getElementById('photo-files').click();return;}
  if(action==='photo-remove'){draft.photos.splice(Number(b.dataset.index),1);refreshPhotos();return;}
  if(action==='photo-main'){draft.photos.unshift(...draft.photos.splice(Number(b.dataset.index),1));refreshPhotos();return;}
+ if(action==='history-add'){const group=availableImageHistory(draft).find(value=>value.id===b.dataset.history),photo=group?.photos?.find(value=>value.id===b.dataset.photo);if(!photo||!mediaSrc(photo))throw Error('Изображение из истории пока недоступно');if(draft.photos.length>=10)throw Error('Можно добавить не больше 10 фотографий');if(draft.photos.some(value=>value.id===photo.id)){toast('Это изображение уже добавлено');return;}draft.photos.push(structuredClone(photo));refreshPhotos();return;}
  if(action==='cards-toggle'){draft.generateCards=b.checked;refreshCards();queueDraftSave();return;}
  if(action.startsWith('gallery-')){
  const track=document.getElementById('gallery-track');let i=action==='gallery-at'?Number(b.dataset.index):galleryIndex+(action==='gallery-next'?1:-1);

@@ -13,7 +13,7 @@ export function cardSpec(record) {
   count:requested?normalizeCardCount(record.cardCount):0,format,
   aspectRatio:format==='landscape'?'4:3':format==='portrait'?'3:4':null,
   uniformAspectRatio:true,baseStyle:record.cardStyle==='designer'?'studio':null,
-  factsSource:'listing.description-and-notes',preserveProduct:true,
+  factsSource:'listing.description-only',preserveProduct:true,
   guide:'instructions/cards/README.md'};
 }
 export function cardRequestKey(record) {
@@ -21,8 +21,8 @@ export function cardRequestKey(record) {
  // Canonical source description: changes to facts or images invalidate old results.
  return JSON.stringify({cards:cardSpec(record),title:record.title||'',raw:record.raw||'',
   description:record.description||'',price:record.price??null,condition:record.condition??null,
-  productKind:record.productKind||'single',quantity:record.quantity??null,defects:record.defects||'',
-  photos:(record.photos||[]).map(p=>({id:p.id,file:p.file||null,name:p.name||'',revision:p.sha||p.updatedAt||null}))});
+  productKind:record.productKind||'single',quantity:record.quantity??null,
+  photos:((record.sourcePhotos?.length?record.sourcePhotos:record.photos)||[]).map(p=>({id:p.id,file:p.file||null,name:p.name||'',revision:p.sha||p.updatedAt||null}))});
 }
 export function cardResultProblem(record, result) {
  if(!record||!record.generateCards)return 'Карточки больше не запрошены';

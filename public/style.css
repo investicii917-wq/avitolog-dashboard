@@ -43,3 +43,9 @@ body{background:var(--bg);color:var(--ink)}.main-head,.page-head,.dock{backgroun
 
 /* Card selection stays within the mobile viewport. */
 .cards-config,.card-style-options,.card-style-option>span{min-width:0;max-width:100%}.card-style-option small{overflow-wrap:anywhere}.card-style-option input:focus-visible+span{outline:2px solid #f0d18e;outline-offset:3px}.cards-config select{width:100%;max-width:100%}.cards-config .help{font-size:12px;line-height:1.5}
+
+
+/* Фото показываются в исходной пропорции: без серых полей и без обрезки. */
+.gallery{background:transparent}.gallery-track figure{height:auto;display:block;line-height:0}.gallery-track img{display:block;width:100%;height:auto;object-fit:initial}.gallery-empty{background:linear-gradient(145deg,#202126,#15161a)}
+.visual-review .btn{margin-top:10px}.image-history{margin-top:14px;border-top:1px solid #40392e;padding-top:12px}.image-history summary{cursor:pointer;color:#d7bc83;font-size:14px;font-weight:700}.history-set{display:grid;gap:8px;margin-top:14px}.history-set>b{font-size:12px;color:var(--muted)}.history-photos{display:flex;gap:8px;overflow:auto;padding-bottom:2px}.history-photos button{flex:0 0 68px;height:68px;padding:0;border:1px solid #5d4b2e;border-radius:9px;overflow:hidden;background:#17181c}.history-photos img{display:block;width:100%;height:100%;object-fit:cover}.history-photos button:focus-visible{outline:2px solid #e0c27f;outline-offset:2px}
+@media(min-width:700px){.gallery-track figure{height:auto}}
