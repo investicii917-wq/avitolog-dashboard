@@ -388,7 +388,7 @@ function render(){
   const update=()=>{galleryIndex=logical(visualIndex-1);if(counter)counter.textContent=(galleryIndex+1)+' / '+count;};
   const settle=()=>{if(visualIndex===0){visualIndex=count;paint(visualIndex);}else if(visualIndex===count+1){visualIndex=1;paint(visualIndex);}update();animating=false;};
   const move=(step)=>{if(count<2||animating)return;animating=true;visualIndex+=step;paint(visualIndex,true);update();clearTimeout(animationTimer);animationTimer=setTimeout(settle,130);};
-  const moveTo=index=>{const target=logical(index),delta=target-galleryIndex;if(!delta)return;move(Math.abs(delta)<=count/2?delta:(delta>0?delta-count:delta+count));};
+  const moveTo=index=>{const target=logical(index);if(target===galleryIndex||animating)return;animating=true;visualIndex=target+1;paint(visualIndex,true);update();clearTimeout(animationTimer);animationTimer=setTimeout(()=>{animating=false;},130);};
   if(count>1){paint(visualIndex);update();}
   track._galleryMove=move;track._galleryMoveTo=moveTo;
   track.addEventListener('pointerdown',event=>{if(event.pointerType==='mouse'||animating||count<2)return;swipe={id:event.pointerId,x:event.clientX,y:event.clientY};track.setPointerCapture?.(event.pointerId);});
