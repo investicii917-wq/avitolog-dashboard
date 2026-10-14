@@ -24,6 +24,7 @@ const money=n=>n==null?'Цена не указана':new Intl.NumberFormat('ru-
 const statusName={queue:'Ожидает обработки',ready:'Готово к публикации',published:'Опубликовано',sold:'Продано',archived:'В архиве'};
 const item=id=>state.items.find(x=>x.id===id);
 const mediaSrc=photo=>photo?.src||photo?.preview||'';
+const samePhoto=(a,b)=>!!((a.id&&b.id&&a.id===b.id)||(a.path&&b.path&&a.path===b.path)||(a.file&&b.file&&a.file===b.file)||([a.src,a.preview].filter(Boolean).some(value=>value===b.src||value===b.preview)));
 const activeCardPhotos=record=>record?.sourcePhotos?.length?record.sourcePhotos:(record?.photos||[]);
 const photoIds=photos=>(photos||[]).map(photo=>photo.id).join('|');
 const samePhotos=(left,right)=>photoIds(left)===photoIds(right);
@@ -45,7 +46,7 @@ function availableImageHistory(record){
  const groups=[...(record.imageHistory||[])].sort((a,b)=>String(b.createdAt||'').localeCompare(String(a.createdAt||'')));
  const seen=new Set(),photos=[];
  for(const photo of [...groups.flatMap(group=>group.photos||[]),...(record.sourcePhotos||[])]){
-  const key=photo.id||mediaSrc(photo);if(!key||seen.has(key))continue;seen.add(key);photos.push(photo);
+  const key=photo.id||mediaSrc(photo);if(!key||seen.has(key)||photos.some(saved=>samePhoto(saved,photo)))continue;seen.add(key);photos.push(photo);
  }
  return [{id:'all-images',photos}];
 }
@@ -118,7 +119,7 @@ function mergeMailboxStates(remote,local){
  const items=mergeById(remote?.items,local?.items).filter(x=>!deleted.includes(x.id)).map(value=>{
   const remoteItem=remoteItems.get(value.id)||{},localItem=localItems.get(value.id)||{};
   const sourceCandidates=[value.sourcePhotos,remoteItem.sourcePhotos,localItem.sourcePhotos].filter(Array.isArray),sourcePhotos=sourceCandidates.find(photos=>photos.some(mediaSrc))||sourceCandidates.find(photos=>photos.length)||[];
-  const groups=[],seen=new Set();for(const group of [...(value.imageHistory||[]),...(localItem.imageHistory||[]),...(remoteItem.imageHistory||[])]){const key=group.id||photoIds(group.photos);if(!key||seen.has(key))continue;seen.add(key);groups.push(group);}
+  const groups=[],seen=new Set();for(const group of [...(value.imageHistory||[]),...(localItem.imageHistory||[]),...(remoteItem.imageHistory||[])]){const key=group.id||photoIds(group.photos);if(!key||seen.has(key)||photos.some(saved=>samePhoto(saved,photo)))continue;seen.add(key);groups.push(group);}
   return normalItem({...value,sourcePhotos,imageHistory:groups.sort((a,b)=>String(b.createdAt||'').localeCompare(String(a.createdAt||'')))});
  });
  const analytics=itemTime(local?.analytics)>=itemTime(remote?.analytics)?(local?.analytics||remote?.analytics):(remote?.analytics||local?.analytics);
@@ -325,11 +326,10 @@ function cardsHtml(d){
  const formats=[['auto','Подобрать по товару'],['landscape','Горизонтальные · 4:3'],['portrait','Вертикальные · 3:4']].map(([key,label])=>'<option value="'+key+'" '+(format===key?'selected':'')+'>'+label+'</option>').join('');
  return '<section class="section cards-section"><label class="switch-row card-switch"><span><b>Создать карточки</b><small>Выберите оформление и количество изображений</small></span><input type="checkbox" name="generateCards" data-action="cards-toggle" '+(enabled?'checked':'')+'></label><div id="cards-config" class="cards-config '+(enabled?'':'is-hidden')+'"><div class="divider"></div><h2>Оформление</h2><p class="help"><a href="./card-examples/" target="_blank" rel="noopener">Посмотреть примеры оформления</a></p><div class="card-style-options">'+options+'</div>'+field('Формат всей серии','<select name="cardFormat">'+formats+'</select>','Все изображения одного товара будут в одном формате.')+field('Количество карточек','<input name="cardCount" type="number" min="1" max="10" step="1" inputmode="numeric" value="'+count+'">','<span id="card-count-note">В серии '+plural(count,'карточка','карточки','карточек')+'.</span>')+'<p class="help">Карточки строятся только по описанию и фотографиям. «Дефекты и нюансы» в изображения и описание не передаются.</p></div></section>';
 }
-function unusedPhotos(d){return availableImageHistory(d)[0].photos.filter(photo=>!d.photos.some(active=>active.id===photo.id));}
+function unusedPhotos(d){return availableImageHistory(d)[0].photos.filter(photo=>!d.photos.some(active=>samePhoto(active,photo)));}
 function allPhotosHtml(d){
- const photos=unusedPhotos(d);
- if(!photos.length)return '';
- return '<div class="all-photos"><div class="all-photos-head"><b>Все фотографии</b></div><div class="history-photos">'+photos.map((photo,index)=>mediaSrc(photo)?'<button type="button" data-action="history-add" data-history="all-images" data-photo="'+esc(photo.id)+'" data-sort-list="all" data-sort-index="'+index+'" aria-label="Добавить изображение в объявление"><img src="'+esc(mediaSrc(photo))+'" alt="" draggable="false"></button>':'').join('')+'</div></div>';
+ const photos=unusedPhotos(d).filter(mediaSrc);
+ return '<details class="all-photos"><summary>Все фотографии<span class="all-photos-arrow" aria-hidden="true">⌄</span></summary>'+(photos.length?'<div class="history-photos">'+photos.map(photo=>'<button type="button" data-action="history-add" data-history="all-images" data-photo="'+esc(photo.id)+'" aria-label="Добавить изображение в объявление"><img src="'+esc(mediaSrc(photo))+'" alt="" loading="lazy" decoding="async" draggable="false"></button>').join('')+'</div>':'<p class="help">Все фотографии уже в объявлении.</p>')+'</details>';
 }
 
 function photosHtml(d){
@@ -499,7 +499,7 @@ root.addEventListener('click',async e=>{
  }
  if(action==='photo-add'){document.getElementById('photo-files').click();return;}
  if(action==='photo-remove'){archiveCurrentPhotos(draft);const [removed]=draft.photos.splice(Number(b.dataset.index),1);if(removed)draft.imageHistory.unshift({id:uid(),label:'Все фотографии',kind:'library',createdAt:new Date().toISOString(),photos:[structuredClone(removed)]});refreshPhotos();return;}
- if(action==='history-add'){const group=availableImageHistory(draft).find(value=>value.id===b.dataset.history),photo=group?.photos?.find(value=>value.id===b.dataset.photo);if(!photo||!mediaSrc(photo))throw Error('Изображение из истории пока недоступно');if(draft.photos.length>=10)throw Error('Можно добавить не больше 10 фотографий');if(draft.photos.some(value=>value.id===photo.id)){toast('Это изображение уже добавлено');return;}draft.photos.push(structuredClone(photo));refreshPhotos();return;}
+ if(action==='history-add'){const group=availableImageHistory(draft).find(value=>value.id===b.dataset.history),photo=group?.photos?.find(value=>value.id===b.dataset.photo);if(!photo||!mediaSrc(photo))throw Error('Изображение из истории пока недоступно');if(draft.photos.length>=10)throw Error('Можно добавить не больше 10 фотографий');if(draft.photos.some(value=>samePhoto(value,photo))){refreshPhotos();return;}draft.photos.push(structuredClone(photo));refreshPhotos();return;}
  if(action==='cards-toggle'){draft.generateCards=b.checked;refreshCards();queueDraftSave();return;}
  if(action.startsWith('gallery-')){
  const track=document.getElementById('gallery-track');if(!track)return;
@@ -543,7 +543,7 @@ function installPhotoSorting(){
  const editor=document.getElementById('photo-editor');
  disposePhotoSorting=editor?installPhotoSort(editor,{move:movePhoto,refresh:refreshPhotos}):null;
 }
-function refreshPhotos(){const el=document.getElementById('photo-editor');if(el)el.innerHTML=photosHtml(draft);refreshCards();installPhotoSorting();queueDraftSave();}
+function refreshPhotos(){const el=document.getElementById('photo-editor');if(el){const wasOpen=!!el.querySelector('.all-photos[open]');el.innerHTML=photosHtml(draft);const library=el.querySelector('.all-photos');if(library)library.open=wasOpen;}refreshCards();installPhotoSorting();queueDraftSave();}
 function refreshCards(){const el=document.getElementById('cards-config');if(!el||!draft)return;const temp=document.createElement('div');temp.innerHTML=cardsHtml(draft);const next=temp.querySelector('#cards-config');if(next)el.replaceWith(next);}
 function refreshCardCountNote(){const value=Math.max(1,Math.min(10,Number(document.querySelector('input[name=cardCount]')?.value)||1)),note=document.getElementById('card-count-note');if(note)note.textContent='В серии '+plural(value,'карточка','карточки','карточек')+'.';}
 function syncProductFields(){const kind=document.querySelector('input[name=productKind]:checked')?.value||'single';document.querySelector('.product-single')?.classList.toggle('is-hidden',kind!=='single');document.querySelector('.product-batch')?.classList.toggle('is-hidden',kind!=='batch');}
