@@ -25,6 +25,7 @@ export function installPhotoSort(root,{move,refresh}){
   const from=siblings.indexOf(d.tile),to=siblings.indexOf(target);
   if(to<0)return;
   target.parentNode.insertBefore(d.tile,to>from?target.nextSibling:target);
+  d.tile.setPointerCapture(d.pointerId);
   d.to=tiles().filter(tile=>tile.dataset.sortList===d.key).indexOf(d.tile);
  };
  const tick=()=>{
@@ -62,7 +63,6 @@ export function installPhotoSort(root,{move,refresh}){
  },{...options,passive:false});
  root.addEventListener('pointerup',event=>{if(drag?.pointerId===event.pointerId){if(drag.active)event.preventDefault();finish(true);}},options);
  root.addEventListener('pointercancel',event=>{if(drag?.pointerId===event.pointerId)finish(false);},options);
- root.addEventListener('lostpointercapture',event=>{if(drag?.pointerId===event.pointerId)finish(false);},options);
  window.addEventListener('blur',()=>finish(false),options);
  return ()=>{controller.abort();if(drag){clearTimeout(drag.timer);cancelAnimationFrame(drag.frame);drag.ghost?.remove();drag.tile.classList.remove('is-sorting');drag=null;}};
 }
