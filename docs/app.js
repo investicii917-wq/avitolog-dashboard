@@ -4,7 +4,7 @@ import {readState,saveState} from './data.js?v=8';
 import {uid,todayKey,normalItem,receiveEvent,addSlot,addBooking,freeTimes,dayLoad,minutes,blankState} from './model.js?v=13';
 const root=document.getElementById('app');
 const CONNECTION_KEY='avitolog-mailbox-connection-v1';
-let state,unlocked=false,mailboxConnection=null,draft=null,galleryIndex=0,toastTimer,photoBusy=false,photoSortSuppressClick=false,commitQueue=Promise.resolve(),mailboxSyncing=false,mailboxSyncTimer,mailboxResultSyncing=false,mailboxResultTimer,mailboxStateTimer,mailboxStateSyncing=false,calendarReturnPath='/analytics';
+let state,unlocked=false,mailboxConnection=null,draft=null,galleryIndex=0,toastTimer,photoBusy=false,photoSortSuppressClick=false,commitQueue=Promise.resolve(),mailboxSyncing=false,mailboxSyncTimer,mailboxResultSyncing=false,mailboxResultTimer,mailboxStateTimer,mailboxStateSyncing=false,mailboxStateFailed=false,calendarReturnPath='/analytics';
 const SITE_REFRESH_INTERVAL=5*60*1000,PROCESSED_FILE_LIMIT=1500;
 const icons={
  back:'<path d="m15 5-7 7 7 7"/>',close:'<path d="m6 6 12 12M18 6 6 18"/>',
@@ -123,7 +123,7 @@ function mailboxSnapshot(source){
 }
 async function syncMailboxState(loadOnly=false){
  if(mailboxStateSyncing||!state||!mailboxConnection?.repo||!mailboxConnection?.accessKey)return;
- mailboxStateSyncing=true;
+ mailboxStateSyncing=true;mailboxStateFailed=false;
  try{
   const path='state/site-state.json',response=await mailboxRequest(path);
   let remote=null,sha=null;
@@ -138,7 +138,7 @@ async function syncMailboxState(loadOnly=false){
   const body={message:'Update current Avitolog state',content:textBase64(JSON.stringify(mailboxSnapshot(state)))};if(sha)body.sha=sha;
   const saved=await mailboxRequest(path,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
   if(!saved.ok&&saved.status===409)queueMailboxStateSync(1600);
- }catch{}finally{mailboxStateSyncing=false;}
+ }catch{mailboxStateFailed=true;}finally{mailboxStateSyncing=false;}
 }
 async function sendMailboxEvent(task){
  const prefix=String(task.createdAt||new Date().toISOString()).replace(/\D/g,'').slice(0,14)+'-'+String(task.id).replace(/[^a-zA-Z0-9-]/g,''),photos=task.type==='cards.requested'?task.payload?.sourcePhotos:(['item.created','item.edited'].includes(task.type)?task.payload?.item?.photos:[]),attachmentNames=(photos||[]).map(()=>null);
@@ -597,7 +597,7 @@ root.addEventListener('paste',async e=>{
 root.addEventListener('input',e=>{if(e.target.hasAttribute('data-time-input')){const digits=e.target.value.replace(/\D/g,'').slice(0,4);e.target.value=digits.slice(0,2)+(digits.length>2?':'+digits.slice(2):'');}if(e.target.name==='cardCount'){if(draft)draft.cardCount=Math.max(1,Math.min(10,Number(e.target.value)||1));refreshCardCountNote();}if(draft?.key==='new'&&e.target.closest('#item-form'))syncNewDraft();});
 window.addEventListener('hashchange',()=>{window.scrollTo(0,0);render();});
 async function boot(){
- try{mailboxConnection=JSON.parse(localStorage.getItem(CONNECTION_KEY)||'null');unlocked=!!(mailboxConnection?.repo&&mailboxConnection?.accessKey);if(unlocked){state=await readState();await syncMailboxState(true);queueMailboxSync();queueMailboxResultSync();}render();}
+ try{mailboxConnection=JSON.parse(localStorage.getItem(CONNECTION_KEY)||'null');unlocked=!!(mailboxConnection?.repo&&mailboxConnection?.accessKey);if(unlocked){state=await readState();for(let attempt=0;attempt<3;attempt++){await syncMailboxState(true);if(!mailboxStateFailed)break;await new Promise(resolve=>setTimeout(resolve,700*(attempt+1)));}queueMailboxSync();queueMailboxResultSync();}render();}
  catch(e){root.innerHTML='<main class="login"><div class="login-card"><h1>Не удалось открыть хранилище</h1><p>'+esc(e.message)+'</p><p>Разрешите хранение данных для сайта и обновите страницу.</p></div></main>';}
 }
 boot();
