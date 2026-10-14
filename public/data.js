@@ -66,3 +66,8 @@ export async function readPhotoMedia(listingId,photos,{full=false}={}){
   return full?{...photo,src:value.src||value.preview||null,preview:value.preview||null}:{...photo,preview:value.preview||value.src||null};
  });
 }
+export async function cachePhotoMedia(listingId,photo){
+ if(!photo||( !photo.src&&!photo.preview))return;
+ const db=await database(),value={mediaKey:keyFor(listingId,photo),src:photo.src||null,preview:photo.preview||null};
+ await new Promise((resolve,reject)=>{const tx=db.transaction(MEDIA,'readwrite');tx.objectStore(MEDIA).put(value,value.mediaKey);tx.oncomplete=resolve;tx.onerror=()=>reject(tx.error);});
+}
