@@ -35,12 +35,21 @@ function rememberPhotoSet(record,photos,label,kind){
  record.imageHistory.unshift({id:uid(),label,kind,createdAt:new Date().toISOString(),photos:saved});
 }
 function rememberImageSet(record,label,kind){rememberPhotoSet(record,record.photos,label,kind);}
-function availableImageHistory(record){
- const source=record?.sourcePhotos?.length?[{id:'source-images',label:'Исходные фотографии',kind:'source',createdAt:record.createdAt||record.updatedAt,photos:record.sourcePhotos}]:[];
- const sourceKey=source.length?photoIds(source[0].photos):'';
- const history=(record?.imageHistory||[]).filter(group=>photoIds(group.photos)!==sourceKey).sort((a,b)=>String(b.createdAt||'').localeCompare(String(a.createdAt||'')));
- return [...history,...source];
+function archiveCurrentPhotos(record){
+ const known=new Set([...(record.sourcePhotos||[]),...(record.imageHistory||[]).flatMap(group=>group.photos||[])].map(photo=>photo.id));
+ const missing=(record.photos||[]).filter(photo=>!known.has(photo.id));
+ if(missing.length)rememberPhotoSet(record,missing,'Все фотографии','library');
 }
+function availableImageHistory(record){
+ archiveCurrentPhotos(record);
+ const groups=[...(record.imageHistory||[])].sort((a,b)=>String(b.createdAt||'').localeCompare(String(a.createdAt||'')));
+ const seen=new Set(),photos=[];
+ for(const photo of [...groups.flatMap(group=>group.photos||[]),...(record.sourcePhotos||[])]){
+  const key=photo.id||mediaSrc(photo);if(!key||seen.has(key))continue;seen.add(key);photos.push(photo);
+ }
+ return [{id:'all-images',photos}];
+}
+
 function cardInputItem(record){
  const copy=structuredClone(record);
  copy.photos=structuredClone(activeCardPhotos(record));
@@ -196,7 +205,7 @@ function mergeRemoteItem(s,source,photos){
  if(index>=0&&itemTime(old)>itemTime(source))return;
  const resolvedPhotos=photos?.length?photos:(source.photos||old.photos||[]);
  const next=normalItem({...old,...source,photos:resolvedPhotos,sourcePhotos:source.sourcePhotos?.length?(photos?.length?structuredClone(photos):source.sourcePhotos):(old.sourcePhotos||[])});
- if(index>=0)s.items[index]=next;else s.items.unshift(next);
+ rememberPhotoSet(next,old.photos,'Все фотографии','library');archiveCurrentPhotos(next);if(index>=0)s.items[index]=next;else s.items.unshift(next);
 }
 function applyMailboxEvent(s,event,photos=[]){
  const p=event?.payload||{},remote=p.item||(event?.type==='item.upsert'?p:null);
@@ -207,7 +216,7 @@ function applyMailboxEvent(s,event,photos=[]){
   if(!record.sourcePhotos?.length)record.sourcePhotos=structuredClone(record.photos||[]);
   rememberImageSet(record,record.generatedCards?'Предыдущая серия карточек':'Исходные фотографии',record.generatedCards?'generated':'source');
   record.photos=photos.length?photos:p.photos;record.generatedCards={style:p.style,aspectRatio:p.aspectRatio,requestKey:p.requestKey,quality:p.quality||'review-required'};
-  record.cardRequestStatus='completed';record.updatedAt=event.createdAt;return;
+  archiveCurrentPhotos(record);record.cardRequestStatus='completed';record.updatedAt=event.createdAt;return;
  }
  if(event?.type==='cards.requested')return;
 
@@ -317,10 +326,11 @@ function cardsHtml(d){
  return '<section class="section cards-section"><label class="switch-row card-switch"><span><b>Создать карточки</b><small>Выберите оформление и количество изображений</small></span><input type="checkbox" name="generateCards" data-action="cards-toggle" '+(enabled?'checked':'')+'></label><div id="cards-config" class="cards-config '+(enabled?'':'is-hidden')+'"><div class="divider"></div><h2>Оформление</h2><p class="help"><a href="./card-examples/" target="_blank" rel="noopener">Посмотреть примеры оформления</a></p><div class="card-style-options">'+options+'</div>'+field('Формат всей серии','<select name="cardFormat">'+formats+'</select>','Все изображения одного товара будут в одном формате.')+field('Количество карточек','<input name="cardCount" type="number" min="1" max="10" step="1" inputmode="numeric" value="'+count+'">','<span id="card-count-note">В серии '+plural(count,'карточка','карточки','карточек')+'.</span>')+'<p class="help">Карточки строятся только по описанию и фотографиям. «Дефекты и нюансы» в изображения и описание не передаются.</p></div></section>';
 }
 function allPhotosHtml(d){
- const groups=availableImageHistory(d).filter(group=>group.photos?.some(mediaSrc));
- if(!groups.length)return '';
- return '<div class="all-photos"><div class="all-photos-head"><b>Все фотографии</b></div>'+groups.map(group=>'<div class="history-set"><b>'+esc(group.label||'Набор изображений')+'</b><div class="history-photos">'+group.photos.map((photo,index)=>mediaSrc(photo)?'<button type="button" data-action="history-add" data-history="'+esc(group.id)+'" data-photo="'+esc(photo.id)+'" data-sort-list="'+esc(group.id==='source-images'?'source':'history:'+group.id)+'" data-sort-index="'+index+'" aria-label="Добавить изображение в текущую галерею"><img src="'+esc(mediaSrc(photo))+'" alt="" draggable="false"></button>':'').join('')+'</div></div>').join('')+'</div>';
+ const photos=availableImageHistory(d)[0].photos;
+ if(!photos.length)return '';
+ return '<div class="all-photos"><div class="all-photos-head"><b>Все фотографии</b></div><div class="history-photos">'+photos.map((photo,index)=>mediaSrc(photo)?'<button type="button" data-action="history-add" data-history="all-images" data-photo="'+esc(photo.id)+'" data-sort-list="all" data-sort-index="'+index+'" aria-label="Добавить изображение в объявление"><img src="'+esc(mediaSrc(photo))+'" alt="" draggable="false"></button>':'').join('')+'</div></div>';
 }
+
 function photosHtml(d){
  const tiles=d.photos.map((p,i)=>'<div class="photo-tile" data-sort-list="current" data-sort-index="'+i+'"><img src="'+esc(mediaSrc(p))+'" alt="Фото '+(i+1)+'" draggable="false"><button type="button" class="remove" data-action="photo-remove" data-index="'+i+'" aria-label="Удалить фото '+(i+1)+'">'+icon('close')+'</button>'+(i===0?'<span class="photo-order">Главное</span>':'')+'</div>').join('');
  return '<div class="photo-editor-head"><b>Фотографии</b><span class="meta">'+d.photos.length+' / 10</span></div><div class="photo-grid">'+tiles+(d.photos.length<10?'<button type="button" class="photo-add" data-action="photo-add">'+icon('plus')+'Добавить фото</button>':'')+'</div><input class="file-input" id="photo-files" type="file" accept="image/*" multiple>'+allPhotosHtml(d);
@@ -487,7 +497,7 @@ root.addEventListener('click',async e=>{
   return;
  }
  if(action==='photo-add'){document.getElementById('photo-files').click();return;}
- if(action==='photo-remove'){draft.photos.splice(Number(b.dataset.index),1);refreshPhotos();return;}
+ if(action==='photo-remove'){archiveCurrentPhotos(draft);draft.photos.splice(Number(b.dataset.index),1);refreshPhotos();return;}
  if(action==='history-add'){const group=availableImageHistory(draft).find(value=>value.id===b.dataset.history),photo=group?.photos?.find(value=>value.id===b.dataset.photo);if(!photo||!mediaSrc(photo))throw Error('Изображение из истории пока недоступно');if(draft.photos.length>=10)throw Error('Можно добавить не больше 10 фотографий');if(draft.photos.some(value=>value.id===photo.id)){toast('Это изображение уже добавлено');return;}draft.photos.push(structuredClone(photo));refreshPhotos();return;}
  if(action==='cards-toggle'){draft.generateCards=b.checked;refreshCards();queueDraftSave();return;}
  if(action.startsWith('gallery-')){
@@ -524,7 +534,7 @@ root.addEventListener('click',async e=>{
  }
  }catch(err){toast(err.message);}finally{if(b.isConnected)b.disabled=false;}
 });
-function photoSortList(key){if(!draft)return null;if(key==='current')return draft.photos;if(key==='source')return draft.sourcePhotos;return key.startsWith('history:')?draft.imageHistory?.find(group=>group.id===key.slice(8))?.photos:null;}
+function photoSortList(key){if(!draft)return null;if(key==='current')return draft.photos;if(key==='all'){const photos=availableImageHistory(draft)[0].photos;draft.imageHistory=[{id:uid(),label:'Все фотографии',kind:'library',createdAt:new Date().toISOString(),photos}];return draft.imageHistory[0].photos;}if(key==='source')return draft.sourcePhotos;return key.startsWith('history:')?draft.imageHistory?.find(group=>group.id===key.slice(8))?.photos:null;}
 function movePhoto(key,from,to){const photos=photoSortList(key);if(!photos||from===to||from<0||to<0||from>=photos.length||to>=photos.length)return false;photos.splice(to,0,...photos.splice(from,1));return true;}
 let disposePhotoSorting=null;
 function installPhotoSorting(){
@@ -552,7 +562,7 @@ async function ingestPhotos(files,input){
  photoBusy=true;
  const saved=await Promise.all(files.map(async f=>{const src=await fileData(f);return {id:uid(),name:f.name,type:f.type,src,preview:await previewData(src)};}));
  if(draft!==targetDraft)return;
- targetDraft.photos.push(...saved);if(targetDraft.key!=='new'){targetDraft.sourcePhotos??=[];targetDraft.sourcePhotos.push(...structuredClone(saved));}refreshPhotos();toast('Добавлено фото: '+files.length);
+ rememberPhotoSet(targetDraft,saved,'Все фотографии','source');targetDraft.photos.push(...saved);if(targetDraft.key!=='new'){targetDraft.sourcePhotos??=[];targetDraft.sourcePhotos.push(...structuredClone(saved));}refreshPhotos();toast('Добавлено фото: '+files.length);
  }catch(err){toast(err.message);if(input)input.value='';}finally{photoBusy=false;}
 }
 root.addEventListener('change',async e=>{
