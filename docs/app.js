@@ -1,3 +1,4 @@
+import {installPhotoSort} from './photo-sort.js?v=1';
 import {CARD_STYLES,normalizeCardStyle,normalizeCardFormat,cardSpec,cardRequestKey,cardResultProblem} from './cards.js?v=2';
 
 import {readState,saveState} from './data.js?v=8';
@@ -108,7 +109,7 @@ function mergeMailboxStates(remote,local){
  const items=mergeById(remote?.items,local?.items).filter(x=>!deleted.includes(x.id)).map(value=>{
   const remoteItem=remoteItems.get(value.id)||{},localItem=localItems.get(value.id)||{};
   const sourceCandidates=[value.sourcePhotos,remoteItem.sourcePhotos,localItem.sourcePhotos].filter(Array.isArray),sourcePhotos=sourceCandidates.find(photos=>photos.some(mediaSrc))||sourceCandidates.find(photos=>photos.length)||[];
-  const groups=[],seen=new Set();for(const group of [...(remoteItem.imageHistory||[]),...(localItem.imageHistory||[]),...(value.imageHistory||[])]){const key=group.id||photoIds(group.photos);if(!key||seen.has(key))continue;seen.add(key);groups.push(group);}
+  const groups=[],seen=new Set();for(const group of [...(value.imageHistory||[]),...(localItem.imageHistory||[]),...(remoteItem.imageHistory||[])]){const key=group.id||photoIds(group.photos);if(!key||seen.has(key))continue;seen.add(key);groups.push(group);}
   return normalItem({...value,sourcePhotos,imageHistory:groups.sort((a,b)=>String(b.createdAt||'').localeCompare(String(a.createdAt||'')))});
  });
  const analytics=itemTime(local?.analytics)>=itemTime(remote?.analytics)?(local?.analytics||remote?.analytics):(remote?.analytics||local?.analytics);
@@ -429,7 +430,7 @@ function inlineError(message){const el=document.getElementById('form-error');if(
 function prepareCardRequest(saved,existing){
  const signature=cardRequestKey(saved),previous=existing?.cardRequestKey??null;
  if(signature!==previous){saved.cardRequestKey=signature;saved.cardRequestStatus=signature?'requested':null;saved.generatedCards=null;}
- else if(existing?.generatedCards){saved.photos=structuredClone(existing.photos);}
+
  return {signature,previous};
 }
 async function saveItem(form){
@@ -525,36 +526,11 @@ root.addEventListener('click',async e=>{
 });
 function photoSortList(key){if(!draft)return null;if(key==='current')return draft.photos;if(key==='source')return draft.sourcePhotos;return key.startsWith('history:')?draft.imageHistory?.find(group=>group.id===key.slice(8))?.photos:null;}
 function movePhoto(key,from,to){const photos=photoSortList(key);if(!photos||from===to||from<0||to<0||from>=photos.length||to>=photos.length)return false;photos.splice(to,0,...photos.splice(from,1));return true;}
+let disposePhotoSorting=null;
 function installPhotoSorting(){
- document.querySelectorAll('[data-sort-list]').forEach(tile=>{
-  let holdTimer=null,start=null,active=false;
-  const clear=()=>{clearTimeout(holdTimer);holdTimer=null;tile.classList.remove('is-sorting');document.querySelectorAll('.sort-target').forEach(value=>value.classList.remove('sort-target'));};
-  tile.addEventListener('pointerdown',event=>{
-   if(event.button!==undefined&&event.button!==0||event.target.closest('.remove'))return;
-   start={x:event.clientX,y:event.clientY,id:event.pointerId};
-   holdTimer=setTimeout(()=>{active=true;tile.classList.add('is-sorting');tile.setPointerCapture?.(event.pointerId);},260);
-  });
-  tile.addEventListener('pointermove',event=>{
-   if(!start||start.id!==event.pointerId)return;
-   if(!active&&Math.hypot(event.clientX-start.x,event.clientY-start.y)>9){clearTimeout(holdTimer);holdTimer=null;return;}
-   if(!active)return;
-   event.preventDefault();document.querySelectorAll('.sort-target').forEach(value=>value.classList.remove('sort-target'));
-   const target=document.elementFromPoint(event.clientX,event.clientY)?.closest('[data-sort-list]');
-   if(target?.dataset.sortList===tile.dataset.sortList)target.classList.add('sort-target');
-  });
-  tile.addEventListener('pointerup',event=>{
-   if(!start||start.id!==event.pointerId){clear();return;}
-   clearTimeout(holdTimer);
-   if(active){
-    const target=document.elementFromPoint(event.clientX,event.clientY)?.closest('[data-sort-list]');
-    photoSortSuppressClick=true;setTimeout(()=>{photoSortSuppressClick=false;},350);
-    if(target?.dataset.sortList===tile.dataset.sortList&&movePhoto(tile.dataset.sortList,Number(tile.dataset.sortIndex),Number(target.dataset.sortIndex)))refreshPhotos();
-    else clear();
-   }else clear();
-   start=null;active=false;
-  });
-  tile.addEventListener('pointercancel',()=>{start=null;active=false;clear();});
- });
+ disposePhotoSorting?.();
+ const editor=document.getElementById('photo-editor');
+ disposePhotoSorting=editor?installPhotoSort(editor,{move:movePhoto,refresh:refreshPhotos}):null;
 }
 function refreshPhotos(){const el=document.getElementById('photo-editor');if(el)el.innerHTML=photosHtml(draft);refreshCards();installPhotoSorting();queueDraftSave();}
 function refreshCards(){const el=document.getElementById('cards-config');if(!el||!draft)return;const temp=document.createElement('div');temp.innerHTML=cardsHtml(draft);const next=temp.querySelector('#cards-config');if(next)el.replaceWith(next);}
