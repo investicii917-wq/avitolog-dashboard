@@ -278,9 +278,7 @@ function gallery(x){
  if(!x.photos.length)return '<div class="gallery gallery-empty">'+icon('photo')+'Фотографии пока не добавлены</div>';
  const visible=x.photos.filter(p=>mediaSrc(p));
  if(!visible.length)return '<div class="gallery gallery-empty">'+icon('photo')+'Фотографии переданы в обработку</div>';
- const figure=(p,i,clone=false)=>'<figure'+(clone?' aria-hidden="true"':'')+'><img src="'+esc(mediaSrc(p))+'" alt="'+(clone?'':esc(x.title)+' — фото '+(i+1))+'"></figure>';
- const slides=visible.length>1?[visible.at(-1),...visible,visible[0]]:visible;
- return '<div class="gallery"><div class="gallery-track" id="gallery-track" data-count="'+visible.length+'">'+slides.map((p,i)=>figure(p,visible.length>1?(i===0?visible.length-1:i===slides.length-1?0:i-1):0,visible.length>1&&(i===0||i===slides.length-1))).join('')+'</div>'+(visible.length>1?'<button class="gallery-arrow left" data-action="gallery-prev" aria-label="Предыдущее фото">'+icon('back')+'</button><button class="gallery-arrow right" data-action="gallery-next" aria-label="Следующее фото">'+icon('next')+'</button>':'')+'<span class="gallery-counter" id="gallery-counter">1 / '+visible.length+'</span></div>'+(visible.length>1?'<div class="gallery-thumbs" aria-label="Фотографии">'+visible.map((p,i)=>'<button data-action="gallery-at" data-index="'+i+'" aria-label="Фото '+(i+1)+'"><img src="'+esc(mediaSrc(p))+'" alt=""></button>').join('')+'</div>':'');
+ return '<div class="gallery"><div class="gallery-track" id="gallery-track">'+visible.map((p,i)=>'<figure><img src="'+esc(mediaSrc(p))+'" alt="'+esc(x.title)+' — фото '+(i+1)+'"></figure>').join('')+'</div>'+(visible.length>1?'<button class="gallery-arrow left" data-action="gallery-prev" aria-label="Предыдущее фото">'+icon('back')+'</button><button class="gallery-arrow right" data-action="gallery-next" aria-label="Следующее фото">'+icon('next')+'</button>':'')+'<span class="gallery-counter" id="gallery-counter">1 / '+visible.length+'</span></div>'+(visible.length>1?'<div class="gallery-thumbs" aria-label="Фотографии">'+visible.map((p,i)=>'<button data-action="gallery-at" data-index="'+i+'" aria-label="Фото '+(i+1)+'"><img src="'+esc(mediaSrc(p))+'" alt=""></button>').join('')+'</div>':'');
 }
 function visualReviewPanel(x){
  if(!x.photos?.length)return section('<h2>Карточки товара</h2><p>Фотографий пока нет. Добавьте исходники и выберите оформление.</p>'+link(icon('plus')+'Настроить карточки'+icon('next'),'/item/'+x.id+'/edit','btn outline block action-link'));
@@ -381,19 +379,17 @@ function render(){
  }catch(e){root.innerHTML=page('Не удалось открыть страницу','/list/queue',section('<p>'+esc(e.message)+'</p>'));}
  const track=document.getElementById('gallery-track');
  if(track){
-  const count=Number(track.dataset.count)||1,counter=document.getElementById('gallery-counter');
-  let settleTimer=null,ready=false;
-  const width=()=>track.clientWidth||1;
-  const visual=()=>Math.round(track.scrollLeft/width());
-  const logical=()=>{const index=visual();return count>1?(index===0?count-1:index===count+1?0:index-1):0;};
-  const update=()=>{galleryIndex=logical();if(counter)counter.textContent=(galleryIndex+1)+' / '+count;};
-  const correctEdge=()=>{if(count<2)return;const index=visual();if(index===0)track.scrollTo({left:count*width(),behavior:'auto'});else if(index===count+1)track.scrollTo({left:width(),behavior:'auto'});update();};
-  const planCorrection=()=>{clearTimeout(settleTimer);settleTimer=setTimeout(correctEdge,90);};
-  const goTo=index=>{const target=((index%count)+count)%count,current=logical();let destination=target+1;if(current===count-1&&target===0)destination=count+1;else if(current===0&&target===count-1)destination=0;track.scrollTo({left:destination*width(),behavior:'smooth'});};
-  track._galleryGo=goTo;
-  requestAnimationFrame(()=>{if(count>1){track.scrollLeft=width();}ready=true;update();});
-  track.addEventListener('scroll',()=>{if(!ready)return;update();planCorrection();},{passive:true});
-  track.addEventListener('scrollend',correctEdge,{passive:true});
+  let swipe=null;
+  const count=track.children.length,counter=document.getElementById('gallery-counter');
+  const setIndex=index=>{galleryIndex=Math.max(0,Math.min(count-1,index));if(counter)counter.textContent=(galleryIndex+1)+' / '+count;document.querySelectorAll('.gallery-thumbs [data-index]').forEach(button=>button.classList.toggle('active',Number(button.dataset.index)===galleryIndex));};
+  const show=index=>{const next=((index%count)+count)%count;track.scrollTo({left:next*track.clientWidth,behavior:'auto'});setIndex(next);};
+  const update=()=>setIndex(Math.round(track.scrollLeft/track.clientWidth));
+  track._galleryShow=show;
+  track.addEventListener('scroll',update,{passive:true});
+  track.addEventListener('pointerdown',event=>{if(event.pointerType==='mouse'||count<2)return;swipe={id:event.pointerId,x:event.clientX,y:event.clientY,index:galleryIndex};track.setPointerCapture?.(event.pointerId);});
+  track.addEventListener('pointerup',event=>{if(!swipe||swipe.id!==event.pointerId)return;const dx=event.clientX-swipe.x,dy=event.clientY-swipe.y,startIndex=swipe.index;swipe=null;if(Math.abs(dx)>=36&&Math.abs(dx)>Math.abs(dy)){if(startIndex===count-1&&dx<0)show(0);else if(startIndex===0&&dx>0)show(count-1);}});
+  track.addEventListener('pointercancel',()=>{swipe=null;});
+  setIndex(0);
  }
 }
 function connectionPage(){
@@ -482,7 +478,7 @@ root.addEventListener('click',async e=>{
  if(action==='cards-toggle'){draft.generateCards=b.checked;refreshCards();queueDraftSave();return;}
  if(action.startsWith('gallery-')){
  const track=document.getElementById('gallery-track');if(!track)return;
- const i=action==='gallery-at'?Number(b.dataset.index):galleryIndex+(action==='gallery-next'?1:-1);track._galleryGo?.(i);return;
+ const i=action==='gallery-at'?Number(b.dataset.index):galleryIndex+(action==='gallery-next'?1:-1);track._galleryShow?.(i);return;
  }
  b.disabled=true;
  if(action==='delete-draft'){if(!window.confirm('Are you sure? Точно хотите удалить этот черновик?'))return;clearTimeout(draftSaveTimer);draft=null;await commit(s=>{delete s.newDraft;return s;});go('/new');toast('Черновик удалён');}
