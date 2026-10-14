@@ -59,3 +59,5 @@ body{background:var(--bg);color:var(--ink)}.main-head,.page-head,.dock{backgroun
 #photo-editor .is-sorting{opacity:.25;transform:none;outline:2px dashed #e0c27f;outline-offset:-2px}
 .photo-drag-ghost{position:fixed!important;z-index:10000!important;pointer-events:none!important;overflow:hidden;border-radius:11px;border:2px solid #e0c27f;box-shadow:0 12px 28px #0008;opacity:.95;background:#17181c;transform:scale(1.04);padding:0;box-sizing:border-box}
 .photo-drag-ghost img{display:block;width:100%;height:100%;object-fit:cover;pointer-events:none}
+
+.all-photos>.history-photos{margin-top:12px;grid-template-columns:repeat(4,minmax(0,1fr))}
