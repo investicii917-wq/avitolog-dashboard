@@ -1,10 +1,11 @@
+import {installPhotoSort} from './photo-sort.js?v=1';
 import {CARD_STYLES,normalizeCardStyle,normalizeCardFormat,cardSpec,cardRequestKey,cardResultProblem} from './cards.js?v=2';
 
 import {readState,saveState} from './data.js?v=8';
 import {uid,todayKey,normalItem,receiveEvent,addSlot,addBooking,freeTimes,dayLoad,minutes,blankState} from './model.js?v=13';
 const root=document.getElementById('app');
 const CONNECTION_KEY='avitolog-mailbox-connection-v1';
-let state,unlocked=false,mailboxConnection=null,draft=null,galleryIndex=0,toastTimer,photoBusy=false,commitQueue=Promise.resolve(),mailboxSyncing=false,mailboxSyncTimer,mailboxResultSyncing=false,mailboxResultTimer,mailboxStateTimer,mailboxStateSyncing=false,calendarReturnPath='/analytics';
+let state,unlocked=false,mailboxConnection=null,draft=null,galleryIndex=0,toastTimer,photoBusy=false,photoSortSuppressClick=false,commitQueue=Promise.resolve(),mailboxSyncing=false,mailboxSyncTimer,mailboxResultSyncing=false,mailboxResultTimer,mailboxStateTimer,mailboxStateSyncing=false,mailboxStateFailed=false,calendarReturnPath='/analytics';
 const SITE_REFRESH_INTERVAL=5*60*1000,PROCESSED_FILE_LIMIT=1500;
 const icons={
  back:'<path d="m15 5-7 7 7 7"/>',close:'<path d="m6 6 12 12M18 6 6 18"/>',
@@ -35,8 +36,10 @@ function rememberPhotoSet(record,photos,label,kind){
 }
 function rememberImageSet(record,label,kind){rememberPhotoSet(record,record.photos,label,kind);}
 function availableImageHistory(record){
- const source=record?.sourcePhotos?.length?[{id:'source-images',label:'Исходные фотографии',kind:'source',createdAt:record.updatedAt||record.createdAt,photos:record.sourcePhotos}]:[];
- return [...source,...(record?.imageHistory||[])];
+ const source=record?.sourcePhotos?.length?[{id:'source-images',label:'Исходные фотографии',kind:'source',createdAt:record.createdAt||record.updatedAt,photos:record.sourcePhotos}]:[];
+ const sourceKey=source.length?photoIds(source[0].photos):'';
+ const history=(record?.imageHistory||[]).filter(group=>photoIds(group.photos)!==sourceKey).sort((a,b)=>String(b.createdAt||'').localeCompare(String(a.createdAt||'')));
+ return [...history,...source];
 }
 function cardInputItem(record){
  const copy=structuredClone(record);
@@ -102,7 +105,13 @@ function mergeMailboxStates(remote,local){
  const resetAt=remote?.mailboxResetAt;
  if(resetAt&&Date.parse(resetAt)>Date.parse(local?.mailboxResetAt||0))return resetMailboxState(local,resetAt);
  const deleted=compactIds([...(remote?.deletedMailboxItemIds||[]),...(local?.deletedMailboxItemIds||[])]);
- const items=mergeById(remote?.items,local?.items).filter(x=>!deleted.includes(x.id)).map(normalItem);
+ const remoteItems=new Map((remote?.items||[]).map(value=>[value.id,value])),localItems=new Map((local?.items||[]).map(value=>[value.id,value]));
+ const items=mergeById(remote?.items,local?.items).filter(x=>!deleted.includes(x.id)).map(value=>{
+  const remoteItem=remoteItems.get(value.id)||{},localItem=localItems.get(value.id)||{};
+  const sourceCandidates=[value.sourcePhotos,remoteItem.sourcePhotos,localItem.sourcePhotos].filter(Array.isArray),sourcePhotos=sourceCandidates.find(photos=>photos.some(mediaSrc))||sourceCandidates.find(photos=>photos.length)||[];
+  const groups=[],seen=new Set();for(const group of [...(value.imageHistory||[]),...(localItem.imageHistory||[]),...(remoteItem.imageHistory||[])]){const key=group.id||photoIds(group.photos);if(!key||seen.has(key))continue;seen.add(key);groups.push(group);}
+  return normalItem({...value,sourcePhotos,imageHistory:groups.sort((a,b)=>String(b.createdAt||'').localeCompare(String(a.createdAt||'')))});
+ });
  const analytics=itemTime(local?.analytics)>=itemTime(remote?.analytics)?(local?.analytics||remote?.analytics):(remote?.analytics||local?.analytics);
  return {...remote,...local,version:state?.version||local?.version||remote?.version,items,slots:mergeById(remote?.slots,local?.slots),bookings:mergeById(remote?.bookings,local?.bookings),outbox:mergeById(remote?.outbox,local?.outbox),deletedMailboxItemIds:deleted,importedMailboxInbox:compactIds([...(remote?.importedMailboxInbox||[]),...(local?.importedMailboxInbox||[])]),processedMailboxResults:compactIds([...(remote?.processedMailboxResults||[]),...(local?.processedMailboxResults||[])]),analytics:analytics||{updatedAt:null,period:null,source:null},newDraft:local?.newDraft||null,mailboxResetAt:remote?.mailboxResetAt||local?.mailboxResetAt||null};
 }
@@ -115,7 +124,7 @@ function mailboxSnapshot(source){
 }
 async function syncMailboxState(loadOnly=false){
  if(mailboxStateSyncing||!state||!mailboxConnection?.repo||!mailboxConnection?.accessKey)return;
- mailboxStateSyncing=true;
+ mailboxStateSyncing=true;mailboxStateFailed=false;
  try{
   const path='state/site-state.json',response=await mailboxRequest(path);
   let remote=null,sha=null;
@@ -130,7 +139,7 @@ async function syncMailboxState(loadOnly=false){
   const body={message:'Update current Avitolog state',content:textBase64(JSON.stringify(mailboxSnapshot(state)))};if(sha)body.sha=sha;
   const saved=await mailboxRequest(path,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
   if(!saved.ok&&saved.status===409)queueMailboxStateSync(1600);
- }catch{}finally{mailboxStateSyncing=false;}
+ }catch{mailboxStateFailed=true;}finally{mailboxStateSyncing=false;}
 }
 async function sendMailboxEvent(task){
  const prefix=String(task.createdAt||new Date().toISOString()).replace(/\D/g,'').slice(0,14)+'-'+String(task.id).replace(/[^a-zA-Z0-9-]/g,''),photos=task.type==='cards.requested'?task.payload?.sourcePhotos:(['item.created','item.edited'].includes(task.type)?task.payload?.item?.photos:[]),attachmentNames=(photos||[]).map(()=>null);
@@ -161,14 +170,15 @@ async function decodeMailboxJson(path,payload){
  return JSON.parse(await raw.text());
 }
 async function readMailboxJson(folder,file){const path=folder+'/'+file.name,response=await mailboxRequest(path);if(!response.ok)throw Error('Не удалось прочитать файл очереди');return decodeMailboxJson(path,await response.json());}
-const mediaType=photo=>photo.type||({jpg:'image/jpeg',jpeg:'image/jpeg',png:'image/png',gif:'image/gif',webp:'image/webp'}[(String(photo.file||'').split('.').pop()||'').toLowerCase()]||'image/jpeg');
+const mediaType=photo=>photo.type||({jpg:'image/jpeg',jpeg:'image/jpeg',png:'image/png',gif:'image/gif',webp:'image/webp'}[(String(photo.path||photo.file||'').split('.').pop()||'').toLowerCase()]||'image/jpeg');
 async function restoreMailboxPhotos(folder,photos){
  const restored=[];
  for(const photo of photos||[]){
   if(photo.src){restored.push(photo);continue;}
-  if(!photo.file){restored.push(photo);continue;}
-  if(!/^[a-zA-Z0-9А-Яа-яЁё_. -]+$/.test(photo.file)||photo.file.includes('..'))throw Error('Некорректный путь фотографии');
-  const response=await mailboxRequest(folder+'/'+photo.file,{headers:{Accept:'application/vnd.github.raw+json'}});
+  const path=photo.path||[folder,photo.file].filter(Boolean).join('/');
+  if(!path){restored.push(photo);continue;}
+  if(path.startsWith('/')||path.includes('..')||!path.split('/').every(part=>/^[a-zA-Z0-9А-Яа-яЁё_. -]+$/.test(part)))throw Error('Некорректный путь фотографии');
+  const response=await mailboxRequest(path,{headers:{Accept:'application/vnd.github.raw+json'}});
   if(!response.ok)throw Error('Не удалось загрузить фотографию. Повторим синхронизацию.');
   const bytes=await response.arrayBuffer();
   if(!bytes.byteLength)throw Error('Получена пустая фотография');
@@ -278,7 +288,8 @@ function gallery(x){
  if(!x.photos.length)return '<div class="gallery gallery-empty">'+icon('photo')+'Фотографии пока не добавлены</div>';
  const visible=x.photos.filter(p=>mediaSrc(p));
  if(!visible.length)return '<div class="gallery gallery-empty">'+icon('photo')+'Фотографии переданы в обработку</div>';
- return '<div class="gallery"><div class="gallery-track" id="gallery-track">'+visible.map((p,i)=>'<figure><img src="'+esc(mediaSrc(p))+'" alt="'+esc(x.title)+' — фото '+(i+1)+'"></figure>').join('')+'</div>'+(visible.length>1?'<button class="gallery-arrow left" data-action="gallery-prev" aria-label="Предыдущее фото">'+icon('back')+'</button><button class="gallery-arrow right" data-action="gallery-next" aria-label="Следующее фото">'+icon('next')+'</button>':'')+'<span class="gallery-counter" id="gallery-counter">1 / '+visible.length+'</span></div>'+(visible.length>1?'<div class="gallery-thumbs" aria-label="Фотографии">'+visible.map((p,i)=>'<button data-action="gallery-at" data-index="'+i+'" aria-label="Фото '+(i+1)+'"><img src="'+esc(mediaSrc(p))+'" alt=""></button>').join('')+'</div>':'');
+ const slides=visible.length>1?[...visible,...visible,...visible,...visible,...visible]:visible;
+ return '<div class="gallery"><div class="gallery-track" id="gallery-track" data-count="'+visible.length+'">'+slides.map((p,i)=>'<figure '+(visible.length>1&&Math.floor(i/visible.length)!==2?'aria-hidden="true"':'')+'><img src="'+esc(mediaSrc(p))+'" alt="'+(visible.length>1&&Math.floor(i/visible.length)!==2?'':esc(x.title)+' — фото '+((i%visible.length)+1))+'"></figure>').join('')+'</div>'+(visible.length>1?'<button class="gallery-arrow left" data-action="gallery-prev" aria-label="Предыдущее фото">'+icon('back')+'</button><button class="gallery-arrow right" data-action="gallery-next" aria-label="Следующее фото">'+icon('next')+'</button>':'')+'<span class="gallery-counter" id="gallery-counter">1 / '+visible.length+'</span></div>'+(visible.length>1?'<div class="gallery-thumbs" aria-label="Фотографии">'+visible.map((p,i)=>'<button data-action="gallery-at" data-index="'+i+'" aria-label="Фото '+(i+1)+'"><img src="'+esc(mediaSrc(p))+'" alt=""></button>').join('')+'</div>':'');
 }
 function visualReviewPanel(x){
  if(!x.photos?.length)return section('<h2>Карточки товара</h2><p>Фотографий пока нет. Добавьте исходники и выберите оформление.</p>'+link(icon('plus')+'Настроить карточки'+icon('next'),'/item/'+x.id+'/edit','btn outline block action-link'));
@@ -305,14 +316,14 @@ function cardsHtml(d){
  const formats=[['auto','Подобрать по товару'],['landscape','Горизонтальные · 4:3'],['portrait','Вертикальные · 3:4']].map(([key,label])=>'<option value="'+key+'" '+(format===key?'selected':'')+'>'+label+'</option>').join('');
  return '<section class="section cards-section"><label class="switch-row card-switch"><span><b>Создать карточки</b><small>Выберите оформление и количество изображений</small></span><input type="checkbox" name="generateCards" data-action="cards-toggle" '+(enabled?'checked':'')+'></label><div id="cards-config" class="cards-config '+(enabled?'':'is-hidden')+'"><div class="divider"></div><h2>Оформление</h2><p class="help"><a href="./card-examples/" target="_blank" rel="noopener">Посмотреть примеры оформления</a></p><div class="card-style-options">'+options+'</div>'+field('Формат всей серии','<select name="cardFormat">'+formats+'</select>','Все изображения одного товара будут в одном формате.')+field('Количество карточек','<input name="cardCount" type="number" min="1" max="10" step="1" inputmode="numeric" value="'+count+'">','<span id="card-count-note">В серии '+plural(count,'карточка','карточки','карточек')+'.</span>')+'<p class="help">Карточки строятся только по описанию и фотографиям. «Дефекты и нюансы» в изображения и описание не передаются.</p></div></section>';
 }
-function imageHistoryHtml(d){
+function allPhotosHtml(d){
  const groups=availableImageHistory(d).filter(group=>group.photos?.some(mediaSrc));
  if(!groups.length)return '';
- return '<details class="image-history"><summary>Добавить из истории</summary><p class="help">Верните отдельные исходники или прошлые варианты карточек.</p>'+groups.map(group=>'<div class="history-set"><b>'+esc(group.label||'Набор изображений')+'</b><div class="history-photos">'+group.photos.map(photo=>mediaSrc(photo)?'<button type="button" data-action="history-add" data-history="'+esc(group.id)+'" data-photo="'+esc(photo.id)+'" aria-label="Добавить изображение из истории"><img src="'+esc(mediaSrc(photo))+'" alt=""></button>':'').join('')+'</div></div>').join('')+'</details>';
+ return '<div class="all-photos"><div class="all-photos-head"><b>Все фотографии</b></div>'+groups.map(group=>'<div class="history-set"><b>'+esc(group.label||'Набор изображений')+'</b><div class="history-photos">'+group.photos.map((photo,index)=>mediaSrc(photo)?'<button type="button" data-action="history-add" data-history="'+esc(group.id)+'" data-photo="'+esc(photo.id)+'" data-sort-list="'+esc(group.id==='source-images'?'source':'history:'+group.id)+'" data-sort-index="'+index+'" aria-label="Добавить изображение в текущую галерею"><img src="'+esc(mediaSrc(photo))+'" alt="" draggable="false"></button>':'').join('')+'</div></div>').join('')+'</div>';
 }
 function photosHtml(d){
- const tiles=d.photos.map((p,i)=>'<div class="photo-tile"><img src="'+esc(mediaSrc(p))+'" alt="Фото '+(i+1)+'"><button type="button" class="remove" data-action="photo-remove" data-index="'+i+'" aria-label="Удалить фото '+(i+1)+'">'+icon('close')+'</button>'+(i===0?'<span class="photo-order">Главное</span>':'<button type="button" class="photo-main" data-action="photo-main" data-index="'+i+'">На обложку</button>')+'</div>').join('');
- return '<div class="photo-editor-head"><b>Фотографии</b><span class="meta">'+d.photos.length+' / 10</span></div><div class="photo-grid">'+tiles+(d.photos.length<10?'<button type="button" class="photo-add" data-action="photo-add">'+icon('plus')+'Добавить фото</button>':'')+'</div><input class="file-input" id="photo-files" type="file" accept="image/*" multiple>'+imageHistoryHtml(d)+'<p class="help" style="margin-top:10px">Можно удалять, менять порядок и добавлять текущие изображения. До 10 фотографий.</p>';
+ const tiles=d.photos.map((p,i)=>'<div class="photo-tile" data-sort-list="current" data-sort-index="'+i+'"><img src="'+esc(mediaSrc(p))+'" alt="Фото '+(i+1)+'" draggable="false"><button type="button" class="remove" data-action="photo-remove" data-index="'+i+'" aria-label="Удалить фото '+(i+1)+'">'+icon('close')+'</button>'+(i===0?'<span class="photo-order">Главное</span>':'')+'</div>').join('');
+ return '<div class="photo-editor-head"><b>Фотографии</b><span class="meta">'+d.photos.length+' / 10</span></div><div class="photo-grid">'+tiles+(d.photos.length<10?'<button type="button" class="photo-add" data-action="photo-add">'+icon('plus')+'Добавить фото</button>':'')+'</div><input class="file-input" id="photo-files" type="file" accept="image/*" multiple>'+allPhotosHtml(d);
 }
 function editPage(id){const d=getDraft(id),isNew=!id,back=isNew?'/list/ready':'/item/'+id;let fields=isNew?field('Что знаете о товаре','<textarea name="raw" rows="7" placeholder="Состояние, комплект, история…">'+esc(d.raw)+'</textarea>'):field('Заголовок','<input name="title" maxlength="50" required value="'+esc(d.title)+'">','До 50 символов')+field('Исходные заметки','<textarea name="raw" rows="5">'+esc(d.raw)+'</textarea>')+field('Описание объявления','<textarea name="description" rows="9">'+esc(d.description)+'</textarea>');fields+=field(isNew?'Желаемая цена, ₽':'Цена, ₽','<input name="price" type="number" min="0" max="1000000000" inputmode="numeric" value="'+(d.price??'')+'" placeholder="Необязательно">');if(!isNew)fields+=field('Время на получение, минут','<input name="pickupMinutes" type="number" inputmode="numeric" min="15" max="480" step="5" required value="'+d.pickupMinutes+'">','Учтите осмотр, разборку и вынос.')+'<label class="switch-row">Доставку можно обсудить<input name="delivery" type="checkbox" '+(d.delivery?'checked':'')+'></label>';return page(isNew?'Новое объявление':'Редактирование',back,'<form id="item-form">'+section('<div id="photo-editor">'+photosHtml(d)+'</div>')+section(fields)+cardsHtml(d)+productFields(d)+'<div id="form-error" aria-live="polite"></div></form>'+(isNew?section(btn('Удалить черновик','delete-draft','danger block'),'delete-zone'):''),'<button class="btn primary" type="submit" form="item-form">'+(isNew?'Добавить объявление':'Сохранить изменения')+'</button>',true);}
 function commentsPage(x){return page('Комментарий для ИИ','/item/'+x.id,section('<h2>'+esc(x.title)+'</h2><p>Укажите, что нужно изменить, уточнить или учесть при обработке текста объявления.</p><form id="comment-form">'+field('Комментарий','<textarea name="text" rows="6" required placeholder="Например: уточнить комплект и самовывоз…"></textarea>')+'</form>')+section('<h2>Комментарии</h2>'+((x.comments||[]).length?x.comments.slice().reverse().map(c=>'<div class="comment">'+esc(c.text)+'<small>'+stamp(c.createdAt)+' · Сохранён для обработки</small></div>').join(''):'<p>Комментариев пока нет.</p>')),'<button class="btn primary" form="comment-form" type="submit">Сохранить комментарий</button>');}
@@ -378,7 +389,23 @@ function render(){
  }else root.innerHTML=listPage(parts[1]||'queue');
  }catch(e){root.innerHTML=page('Не удалось открыть страницу','/list/queue',section('<p>'+esc(e.message)+'</p>'));}
  const track=document.getElementById('gallery-track');
- if(track)track.addEventListener('scroll',()=>{galleryIndex=Math.round(track.scrollLeft/track.clientWidth);document.getElementById('gallery-counter').textContent=(galleryIndex+1)+' / '+track.children.length;},{passive:true});
+ if(track){
+  let swipe=null;
+  const count=Number(track.dataset.count)||1,counter=document.getElementById('gallery-counter');
+  const page=()=>Math.round(track.scrollLeft/(track.clientWidth||1));
+  const setIndex=index=>{galleryIndex=((index%count)+count)%count;if(counter)counter.textContent=(galleryIndex+1)+' / '+count;document.querySelectorAll('.gallery-thumbs [data-index]').forEach(button=>button.classList.toggle('active',Number(button.dataset.index)===galleryIndex));};
+  const jump=target=>{const behavior=track.style.scrollBehavior;track.style.scrollBehavior='auto';track.scrollLeft=target*(track.clientWidth||1);requestAnimationFrame(()=>{track.style.scrollBehavior=behavior;});setIndex(target);};
+  const showPage=target=>{track.scrollTo({left:target*(track.clientWidth||1),behavior:'smooth'});setIndex(target);};
+  const update=()=>setIndex(page());
+  track._galleryStep=step=>{const current=page(),target=current+step;if(target<0)jump(count*3-1);else if(target>=count*5)jump(count*2);else showPage(target);};
+  track._galleryPick=index=>jump(count*2+Number(index));
+  track.addEventListener('scroll',update,{passive:true});
+  track.addEventListener('pointerdown',event=>{if(event.pointerType==='mouse'||count<2)return;swipe={id:event.pointerId,x:event.clientX,y:event.clientY,page:page()};track.setPointerCapture?.(event.pointerId);});
+  track.addEventListener('pointerup',event=>{if(!swipe||swipe.id!==event.pointerId)return;const dx=event.clientX-swipe.x,dy=event.clientY-swipe.y,startPage=swipe.page;swipe=null;if(Math.abs(dx)>=36&&Math.abs(dx)>Math.abs(dy)){if(startPage===count*5-1&&dx<0)jump(count*2);else if(startPage===0&&dx>0)jump(count*3-1);}});
+  track.addEventListener('pointercancel',()=>{swipe=null;});
+  requestAnimationFrame(()=>jump(count*2));
+ }
+ installPhotoSorting();
 }
 function connectionPage(){
  const saved=mailboxConnection||{};
@@ -403,7 +430,7 @@ function inlineError(message){const el=document.getElementById('form-error');if(
 function prepareCardRequest(saved,existing){
  const signature=cardRequestKey(saved),previous=existing?.cardRequestKey??null;
  if(signature!==previous){saved.cardRequestKey=signature;saved.cardRequestStatus=signature?'requested':null;saved.generatedCards=null;}
- else if(existing?.generatedCards){saved.photos=structuredClone(existing.photos);}
+
  return {signature,previous};
 }
 async function saveItem(form){
@@ -411,11 +438,10 @@ async function saveItem(form){
  const f=new FormData(form),isNew=draft.key==='new';
  const raw=String(f.get('raw')||'').trim(),productKind=f.get('productKind')==='batch'?'batch':'single';
  const quantity=productKind==='batch'?(Number(f.get('quantity'))||null):null;
- const data={...(isNew?{}:item(draft.id)),id:isNew?uid():draft.id,status:isNew?'queue':draft.status,title:isNew?(raw.split(/[\n.!?]/)[0]||'Новое объявление').slice(0,50):String(f.get('title')||'').trim(),raw,description:isNew?'':String(f.get('description')||''),photos:draft.photos,price:f.get('price')===''?null:Number(f.get('price')),pickupMinutes:isNew?60:Number(f.get('pickupMinutes')),delivery:!isNew&&f.has('delivery'),productKind,condition:productKind==='single'?(f.get('condition')==='new'?'new':'used'):null,defects:String(f.get('defects')||'').trim(),quantity,generateCards:f.has('generateCards'),cardStyle:normalizeCardStyle(f.get('cardStyle')),cardFormat:normalizeCardFormat(f.get('cardFormat')),cardCount:Number(f.get('cardCount'))||1,updatedAt:new Date().toISOString()};
+ const data={...(isNew?{}:item(draft.id)),id:isNew?uid():draft.id,status:isNew?'queue':draft.status,title:isNew?(raw.split(/[\n.!?]/)[0]||'Новое объявление').slice(0,50):String(f.get('title')||'').trim(),raw,description:isNew?'':String(f.get('description')||''),photos:draft.photos,imageHistory:structuredClone(draft.imageHistory||[]),price:f.get('price')===''?null:Number(f.get('price')),pickupMinutes:isNew?60:Number(f.get('pickupMinutes')),delivery:!isNew&&f.has('delivery'),productKind,condition:productKind==='single'?(f.get('condition')==='new'?'new':'used'):null,defects:String(f.get('defects')||'').trim(),quantity,generateCards:f.has('generateCards'),cardStyle:normalizeCardStyle(f.get('cardStyle')),cardFormat:normalizeCardFormat(f.get('cardFormat')),cardCount:Number(f.get('cardCount'))||1,updatedAt:new Date().toISOString()};
  const existing=isNew?null:item(draft.id);
- const changedPhotos=!isNew&&!samePhotos(existing?.photos,draft.photos);
  if(isNew)data.sourcePhotos=structuredClone(draft.photos);
- else if(changedPhotos){if(existing?.photos?.length)rememberPhotoSet(data,existing.photos,existing.generatedCards?'Предыдущая серия карточек':'Предыдущие фотографии',existing.generatedCards?'generated':'manual');if(existing?.sourcePhotos?.length)rememberPhotoSet(data,existing.sourcePhotos,'Предыдущие исходники','source');data.sourcePhotos=structuredClone(draft.photos);}else data.sourcePhotos=structuredClone(existing?.sourcePhotos||[]);
+ else data.sourcePhotos=structuredClone(draft.sourcePhotos||existing?.sourcePhotos||[]);
    if(data.pickupMinutes<15||data.pickupMinutes>480)throw Error('Укажите время получения от 15 до 480 минут');
  const event={id:uid(),type:'item.upsert',payload:normalItem(data)};
  if(isNew)clearTimeout(draftSaveTimer);
@@ -451,6 +477,7 @@ async function updateItem(patch){
  const id=route().parts[1];await commit(s=>{const idx=s.items.findIndex(x=>x.id===id);s.items[idx]=normalItem({...s.items[idx],...patch,updatedAt:new Date().toISOString()});addOutbox(s,'item.edited',{itemId:id,item:s.items[idx],changes:patch},listingMarkers(s.items[idx],'listing.update'));return s;});
 }
 root.addEventListener('click',async e=>{
+ if(photoSortSuppressClick){e.preventDefault();photoSortSuppressClick=false;return;}
  const b=e.target.closest('[data-action]');if(!b||b.disabled)return;const action=b.dataset.action;
  try{
  if(action==='calendar-toggle'){
@@ -461,12 +488,11 @@ root.addEventListener('click',async e=>{
  }
  if(action==='photo-add'){document.getElementById('photo-files').click();return;}
  if(action==='photo-remove'){draft.photos.splice(Number(b.dataset.index),1);refreshPhotos();return;}
- if(action==='photo-main'){draft.photos.unshift(...draft.photos.splice(Number(b.dataset.index),1));refreshPhotos();return;}
  if(action==='history-add'){const group=availableImageHistory(draft).find(value=>value.id===b.dataset.history),photo=group?.photos?.find(value=>value.id===b.dataset.photo);if(!photo||!mediaSrc(photo))throw Error('Изображение из истории пока недоступно');if(draft.photos.length>=10)throw Error('Можно добавить не больше 10 фотографий');if(draft.photos.some(value=>value.id===photo.id)){toast('Это изображение уже добавлено');return;}draft.photos.push(structuredClone(photo));refreshPhotos();return;}
  if(action==='cards-toggle'){draft.generateCards=b.checked;refreshCards();queueDraftSave();return;}
  if(action.startsWith('gallery-')){
- const track=document.getElementById('gallery-track');let i=action==='gallery-at'?Number(b.dataset.index):galleryIndex+(action==='gallery-next'?1:-1);
- i=Math.max(0,Math.min(track.children.length-1,i));track.scrollTo({left:i*track.clientWidth,behavior:'smooth'});return;
+ const track=document.getElementById('gallery-track');if(!track)return;
+ if(action==='gallery-at')track._galleryPick?.(Number(b.dataset.index));else track._galleryStep?.(action==='gallery-next'?1:-1);return;
  }
  b.disabled=true;
  if(action==='delete-draft'){if(!window.confirm('Are you sure? Точно хотите удалить этот черновик?'))return;clearTimeout(draftSaveTimer);draft=null;await commit(s=>{delete s.newDraft;return s;});go('/new');toast('Черновик удалён');}
@@ -498,7 +524,15 @@ root.addEventListener('click',async e=>{
  }
  }catch(err){toast(err.message);}finally{if(b.isConnected)b.disabled=false;}
 });
-function refreshPhotos(){const el=document.getElementById('photo-editor');if(el)el.innerHTML=photosHtml(draft);refreshCards();queueDraftSave();}
+function photoSortList(key){if(!draft)return null;if(key==='current')return draft.photos;if(key==='source')return draft.sourcePhotos;return key.startsWith('history:')?draft.imageHistory?.find(group=>group.id===key.slice(8))?.photos:null;}
+function movePhoto(key,from,to){const photos=photoSortList(key);if(!photos||from===to||from<0||to<0||from>=photos.length||to>=photos.length)return false;photos.splice(to,0,...photos.splice(from,1));return true;}
+let disposePhotoSorting=null;
+function installPhotoSorting(){
+ disposePhotoSorting?.();
+ const editor=document.getElementById('photo-editor');
+ disposePhotoSorting=editor?installPhotoSort(editor,{move:movePhoto,refresh:refreshPhotos}):null;
+}
+function refreshPhotos(){const el=document.getElementById('photo-editor');if(el)el.innerHTML=photosHtml(draft);refreshCards();installPhotoSorting();queueDraftSave();}
 function refreshCards(){const el=document.getElementById('cards-config');if(!el||!draft)return;const temp=document.createElement('div');temp.innerHTML=cardsHtml(draft);const next=temp.querySelector('#cards-config');if(next)el.replaceWith(next);}
 function refreshCardCountNote(){const value=Math.max(1,Math.min(10,Number(document.querySelector('input[name=cardCount]')?.value)||1)),note=document.getElementById('card-count-note');if(note)note.textContent='В серии '+plural(value,'карточка','карточки','карточек')+'.';}
 function syncProductFields(){const kind=document.querySelector('input[name=productKind]:checked')?.value||'single';document.querySelector('.product-single')?.classList.toggle('is-hidden',kind!=='single');document.querySelector('.product-batch')?.classList.toggle('is-hidden',kind!=='batch');}
@@ -518,7 +552,7 @@ async function ingestPhotos(files,input){
  photoBusy=true;
  const saved=await Promise.all(files.map(async f=>{const src=await fileData(f);return {id:uid(),name:f.name,type:f.type,src,preview:await previewData(src)};}));
  if(draft!==targetDraft)return;
- targetDraft.photos.push(...saved);refreshPhotos();toast('Добавлено фото: '+files.length);
+ targetDraft.photos.push(...saved);if(targetDraft.key!=='new'){targetDraft.sourcePhotos??=[];targetDraft.sourcePhotos.push(...structuredClone(saved));}refreshPhotos();toast('Добавлено фото: '+files.length);
  }catch(err){toast(err.message);if(input)input.value='';}finally{photoBusy=false;}
 }
 root.addEventListener('change',async e=>{
@@ -539,7 +573,7 @@ root.addEventListener('paste',async e=>{
 root.addEventListener('input',e=>{if(e.target.hasAttribute('data-time-input')){const digits=e.target.value.replace(/\D/g,'').slice(0,4);e.target.value=digits.slice(0,2)+(digits.length>2?':'+digits.slice(2):'');}if(e.target.name==='cardCount'){if(draft)draft.cardCount=Math.max(1,Math.min(10,Number(e.target.value)||1));refreshCardCountNote();}if(draft?.key==='new'&&e.target.closest('#item-form'))syncNewDraft();});
 window.addEventListener('hashchange',()=>{window.scrollTo(0,0);render();});
 async function boot(){
- try{mailboxConnection=JSON.parse(localStorage.getItem(CONNECTION_KEY)||'null');unlocked=!!(mailboxConnection?.repo&&mailboxConnection?.accessKey);if(unlocked){state=await readState();await syncMailboxState(true);queueMailboxSync();queueMailboxResultSync();}render();}
+ try{mailboxConnection=JSON.parse(localStorage.getItem(CONNECTION_KEY)||'null');unlocked=!!(mailboxConnection?.repo&&mailboxConnection?.accessKey);if(unlocked){state=await readState();for(let attempt=0;attempt<3;attempt++){await syncMailboxState(true);if(!mailboxStateFailed)break;await new Promise(resolve=>setTimeout(resolve,700*(attempt+1)));}queueMailboxSync();queueMailboxResultSync();}render();}
  catch(e){root.innerHTML='<main class="login"><div class="login-card"><h1>Не удалось открыть хранилище</h1><p>'+esc(e.message)+'</p><p>Разрешите хранение данных для сайта и обновите страницу.</p></div></main>';}
 }
 boot();
