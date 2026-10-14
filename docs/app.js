@@ -325,8 +325,9 @@ function cardsHtml(d){
  const formats=[['auto','Подобрать по товару'],['landscape','Горизонтальные · 4:3'],['portrait','Вертикальные · 3:4']].map(([key,label])=>'<option value="'+key+'" '+(format===key?'selected':'')+'>'+label+'</option>').join('');
  return '<section class="section cards-section"><label class="switch-row card-switch"><span><b>Создать карточки</b><small>Выберите оформление и количество изображений</small></span><input type="checkbox" name="generateCards" data-action="cards-toggle" '+(enabled?'checked':'')+'></label><div id="cards-config" class="cards-config '+(enabled?'':'is-hidden')+'"><div class="divider"></div><h2>Оформление</h2><p class="help"><a href="./card-examples/" target="_blank" rel="noopener">Посмотреть примеры оформления</a></p><div class="card-style-options">'+options+'</div>'+field('Формат всей серии','<select name="cardFormat">'+formats+'</select>','Все изображения одного товара будут в одном формате.')+field('Количество карточек','<input name="cardCount" type="number" min="1" max="10" step="1" inputmode="numeric" value="'+count+'">','<span id="card-count-note">В серии '+plural(count,'карточка','карточки','карточек')+'.</span>')+'<p class="help">Карточки строятся только по описанию и фотографиям. «Дефекты и нюансы» в изображения и описание не передаются.</p></div></section>';
 }
+function unusedPhotos(d){return availableImageHistory(d)[0].photos.filter(photo=>!d.photos.some(active=>active.id===photo.id));}
 function allPhotosHtml(d){
- const photos=availableImageHistory(d)[0].photos;
+ const photos=unusedPhotos(d);
  if(!photos.length)return '';
  return '<div class="all-photos"><div class="all-photos-head"><b>Все фотографии</b></div><div class="history-photos">'+photos.map((photo,index)=>mediaSrc(photo)?'<button type="button" data-action="history-add" data-history="all-images" data-photo="'+esc(photo.id)+'" data-sort-list="all" data-sort-index="'+index+'" aria-label="Добавить изображение в объявление"><img src="'+esc(mediaSrc(photo))+'" alt="" draggable="false"></button>':'').join('')+'</div></div>';
 }
@@ -497,7 +498,7 @@ root.addEventListener('click',async e=>{
   return;
  }
  if(action==='photo-add'){document.getElementById('photo-files').click();return;}
- if(action==='photo-remove'){archiveCurrentPhotos(draft);draft.photos.splice(Number(b.dataset.index),1);refreshPhotos();return;}
+ if(action==='photo-remove'){archiveCurrentPhotos(draft);const [removed]=draft.photos.splice(Number(b.dataset.index),1);if(removed)draft.imageHistory.unshift({id:uid(),label:'Все фотографии',kind:'library',createdAt:new Date().toISOString(),photos:[structuredClone(removed)]});refreshPhotos();return;}
  if(action==='history-add'){const group=availableImageHistory(draft).find(value=>value.id===b.dataset.history),photo=group?.photos?.find(value=>value.id===b.dataset.photo);if(!photo||!mediaSrc(photo))throw Error('Изображение из истории пока недоступно');if(draft.photos.length>=10)throw Error('Можно добавить не больше 10 фотографий');if(draft.photos.some(value=>value.id===photo.id)){toast('Это изображение уже добавлено');return;}draft.photos.push(structuredClone(photo));refreshPhotos();return;}
  if(action==='cards-toggle'){draft.generateCards=b.checked;refreshCards();queueDraftSave();return;}
  if(action.startsWith('gallery-')){
@@ -535,7 +536,7 @@ root.addEventListener('click',async e=>{
  }catch(err){toast(err.message);}finally{if(b.isConnected)b.disabled=false;}
 });
 function photoSortList(key){if(!draft)return null;if(key==='current')return draft.photos;if(key==='all'){const photos=availableImageHistory(draft)[0].photos;draft.imageHistory=[{id:uid(),label:'Все фотографии',kind:'library',createdAt:new Date().toISOString(),photos}];return draft.imageHistory[0].photos;}if(key==='source')return draft.sourcePhotos;return key.startsWith('history:')?draft.imageHistory?.find(group=>group.id===key.slice(8))?.photos:null;}
-function movePhoto(key,from,to){const photos=photoSortList(key);if(!photos||from===to||from<0||to<0||from>=photos.length||to>=photos.length)return false;photos.splice(to,0,...photos.splice(from,1));return true;}
+function movePhoto(key,from,to){if(key==='all'){const photos=unusedPhotos(draft);if(from===to||from<0||to<0||from>=photos.length||to>=photos.length)return false;photos.splice(to,0,...photos.splice(from,1));draft.imageHistory=[{id:uid(),label:'Все фотографии',kind:'library',createdAt:new Date().toISOString(),photos:[...photos,...structuredClone(draft.photos)]}];return true;}const photos=photoSortList(key);if(!photos||from===to||from<0||to<0||from>=photos.length||to>=photos.length)return false;photos.splice(to,0,...photos.splice(from,1));return true;}
 let disposePhotoSorting=null;
 function installPhotoSorting(){
  disposePhotoSorting?.();
