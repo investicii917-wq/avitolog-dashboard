@@ -278,9 +278,7 @@ function gallery(x){
  if(!x.photos.length)return '<div class="gallery gallery-empty">'+icon('photo')+'Фотографии пока не добавлены</div>';
  const visible=x.photos.filter(p=>mediaSrc(p));
  if(!visible.length)return '<div class="gallery gallery-empty">'+icon('photo')+'Фотографии переданы в обработку</div>';
- const figure=(p,i)=>'<figure><img src="'+esc(mediaSrc(p))+'" alt="'+esc(x.title)+' — фото '+(i+1)+'"></figure>';
- const slides=visible.length>1?[visible.at(-1),...visible,visible[0]]:visible;
- return '<div class="gallery"><div class="gallery-track" id="gallery-track" data-count="'+visible.length+'">'+slides.map((p,i)=>figure(p,visible.length>1?(i===0?visible.length-1:i===slides.length-1?0:i-1):0)).join('')+'</div>'+(visible.length>1?'<button class="gallery-arrow left" data-action="gallery-prev" aria-label="Предыдущее фото">'+icon('back')+'</button><button class="gallery-arrow right" data-action="gallery-next" aria-label="Следующее фото">'+icon('next')+'</button>':'')+'<span class="gallery-counter" id="gallery-counter">1 / '+visible.length+'</span></div>'+(visible.length>1?'<div class="gallery-thumbs" aria-label="Фотографии">'+visible.map((p,i)=>'<button data-action="gallery-at" data-index="'+i+'" aria-label="Фото '+(i+1)+'"><img src="'+esc(mediaSrc(p))+'" alt=""></button>').join('')+'</div>':'');
+ return '<div class="gallery"><div class="gallery-track" id="gallery-track">'+visible.map((p,i)=>'<figure><img src="'+esc(mediaSrc(p))+'" alt="'+esc(x.title)+' — фото '+(i+1)+'"></figure>').join('')+'</div>'+(visible.length>1?'<button class="gallery-arrow left" data-action="gallery-prev" aria-label="Предыдущее фото">'+icon('back')+'</button><button class="gallery-arrow right" data-action="gallery-next" aria-label="Следующее фото">'+icon('next')+'</button>':'')+'<span class="gallery-counter" id="gallery-counter">1 / '+visible.length+'</span></div>'+(visible.length>1?'<div class="gallery-thumbs" aria-label="Фотографии">'+visible.map((p,i)=>'<button data-action="gallery-at" data-index="'+i+'" aria-label="Фото '+(i+1)+'"><img src="'+esc(mediaSrc(p))+'" alt=""></button>').join('')+'</div>':'');
 }
 function visualReviewPanel(x){
  if(!x.photos?.length)return section('<h2>Карточки товара</h2><p>Фотографий пока нет. Добавьте исходники и выберите оформление.</p>'+link(icon('plus')+'Настроить карточки'+icon('next'),'/item/'+x.id+'/edit','btn outline block action-link'));
@@ -381,20 +379,12 @@ function render(){
  }catch(e){root.innerHTML=page('Не удалось открыть страницу','/list/queue',section('<p>'+esc(e.message)+'</p>'));}
  const track=document.getElementById('gallery-track');
  if(track){
-  const count=Number(track.dataset.count)||1,counter=document.getElementById('gallery-counter');
-  let visualIndex=count>1?1:0,swipe=null,animationTimer=null,animating=false;
-  const logical=index=>((index%count)+count)%count;
-  const paint=(index,animate=false,drag=0)=>{track.style.transition=animate?'transform 120ms cubic-bezier(.2,.85,.35,1)':'none';track.style.transform='translate3d(calc('+-index*100+'% + '+drag+'px),0,0)';};
-  const update=()=>{galleryIndex=logical(visualIndex-1);if(counter)counter.textContent=(galleryIndex+1)+' / '+count;};
-  const settle=()=>{if(visualIndex===0){visualIndex=count;paint(visualIndex);}else if(visualIndex===count+1){visualIndex=1;paint(visualIndex);}update();animating=false;};
-  const move=(step)=>{if(count<2||animating)return;animating=true;visualIndex+=step;paint(visualIndex,true);update();clearTimeout(animationTimer);animationTimer=setTimeout(settle,130);};
-  const moveTo=index=>{const target=logical(index);if(target===galleryIndex||animating)return;animating=true;visualIndex=target+1;paint(visualIndex,true);update();clearTimeout(animationTimer);animationTimer=setTimeout(()=>{animating=false;},130);};
-  if(count>1){paint(visualIndex);update();}
-  track._galleryMove=move;track._galleryMoveTo=moveTo;
-  track.addEventListener('pointerdown',event=>{if(event.pointerType==='mouse'||animating||count<2)return;swipe={id:event.pointerId,x:event.clientX,y:event.clientY};track.setPointerCapture?.(event.pointerId);});
-  track.addEventListener('pointermove',event=>{if(!swipe||swipe.id!==event.pointerId)return;const dx=event.clientX-swipe.x,dy=event.clientY-swipe.y;if(Math.abs(dx)>Math.abs(dy))paint(visualIndex,false,dx);});
-  track.addEventListener('pointerup',event=>{if(!swipe||swipe.id!==event.pointerId)return;const dx=event.clientX-swipe.x,dy=event.clientY-swipe.y;swipe=null;if(Math.abs(dx)>=28&&Math.abs(dx)>Math.abs(dy))move(dx<0?1:-1);else paint(visualIndex,true);});
-  track.addEventListener('pointercancel',()=>{swipe=null;paint(visualIndex,true);});
+  let swipe=null;
+  const moveTo=index=>{const next=Math.max(0,Math.min(track.children.length-1,index));track.scrollTo({left:next*track.clientWidth,behavior:'smooth'});};
+  track.addEventListener('scroll',()=>{galleryIndex=Math.round(track.scrollLeft/track.clientWidth);document.getElementById('gallery-counter').textContent=(galleryIndex+1)+' / '+track.children.length;},{passive:true});
+  track.addEventListener('pointerdown',event=>{if(event.pointerType==='mouse')return;swipe={id:event.pointerId,x:event.clientX,y:event.clientY};track.setPointerCapture?.(event.pointerId);});
+  track.addEventListener('pointerup',event=>{if(!swipe||swipe.id!==event.pointerId)return;const dx=event.clientX-swipe.x,dy=event.clientY-swipe.y;swipe=null;if(Math.abs(dx)>=36&&Math.abs(dx)>Math.abs(dy))moveTo(galleryIndex+(dx<0?1:-1));});
+  track.addEventListener('pointercancel',()=>{swipe=null;});
  }
 }
 function connectionPage(){
@@ -482,8 +472,8 @@ root.addEventListener('click',async e=>{
  if(action==='history-add'){const group=availableImageHistory(draft).find(value=>value.id===b.dataset.history),photo=group?.photos?.find(value=>value.id===b.dataset.photo);if(!photo||!mediaSrc(photo))throw Error('Изображение из истории пока недоступно');if(draft.photos.length>=10)throw Error('Можно добавить не больше 10 фотографий');if(draft.photos.some(value=>value.id===photo.id)){toast('Это изображение уже добавлено');return;}draft.photos.push(structuredClone(photo));refreshPhotos();return;}
  if(action==='cards-toggle'){draft.generateCards=b.checked;refreshCards();queueDraftSave();return;}
  if(action.startsWith('gallery-')){
- const track=document.getElementById('gallery-track');if(!track)return;
- if(action==='gallery-at')track._galleryMoveTo?.(Number(b.dataset.index));else track._galleryMove?.(action==='gallery-next'?1:-1);return;
+ const track=document.getElementById('gallery-track');let i=action==='gallery-at'?Number(b.dataset.index):galleryIndex+(action==='gallery-next'?1:-1);
+ i=Math.max(0,Math.min(track.children.length-1,i));track.scrollTo({left:i*track.clientWidth,behavior:'smooth'});return;
  }
  b.disabled=true;
  if(action==='delete-draft'){if(!window.confirm('Are you sure? Точно хотите удалить этот черновик?'))return;clearTimeout(draftSaveTimer);draft=null;await commit(s=>{delete s.newDraft;return s;});go('/new');toast('Черновик удалён');}
