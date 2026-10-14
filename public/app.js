@@ -1,7 +1,7 @@
 import {CARD_STYLES,normalizeCardStyle,normalizeCardFormat,cardSpec,cardRequestKey,cardResultProblem} from './cards.js?v=2';
 
 import {readState,saveState} from './data.js?v=8';
-import {uid,todayKey,normalItem,receiveEvent,addSlot,addBooking,freeTimes,dayLoad,minutes} from './model.js?v=13';
+import {uid,todayKey,normalItem,receiveEvent,addSlot,addBooking,freeTimes,dayLoad,minutes,blankState} from './model.js?v=13';
 const root=document.getElementById('app');
 const CONNECTION_KEY='avitolog-mailbox-connection-v1';
 let state,unlocked=false,mailboxConnection=null,draft=null,galleryIndex=0,toastTimer,photoBusy=false,commitQueue=Promise.resolve(),mailboxSyncing=false,mailboxSyncTimer,mailboxResultSyncing=false,mailboxResultTimer,mailboxStateTimer,mailboxStateSyncing=false,calendarReturnPath='/analytics';
@@ -94,11 +94,17 @@ function mergeById(remote,local){
  }
  return [...merged.values()];
 }
+function resetMailboxState(current,resetAt){
+ const clean=blankState();
+ return {...clean,version:current?.version||clean.version,mailboxResetAt:resetAt};
+}
 function mergeMailboxStates(remote,local){
+ const resetAt=remote?.mailboxResetAt;
+ if(resetAt&&Date.parse(resetAt)>Date.parse(local?.mailboxResetAt||0))return resetMailboxState(local,resetAt);
  const deleted=compactIds([...(remote?.deletedMailboxItemIds||[]),...(local?.deletedMailboxItemIds||[])]);
  const items=mergeById(remote?.items,local?.items).filter(x=>!deleted.includes(x.id)).map(normalItem);
  const analytics=itemTime(local?.analytics)>=itemTime(remote?.analytics)?(local?.analytics||remote?.analytics):(remote?.analytics||local?.analytics);
- return {...remote,...local,version:state?.version||local?.version||remote?.version,items,slots:mergeById(remote?.slots,local?.slots),bookings:mergeById(remote?.bookings,local?.bookings),outbox:mergeById(remote?.outbox,local?.outbox),deletedMailboxItemIds:deleted,importedMailboxInbox:compactIds([...(remote?.importedMailboxInbox||[]),...(local?.importedMailboxInbox||[])]),processedMailboxResults:compactIds([...(remote?.processedMailboxResults||[]),...(local?.processedMailboxResults||[])]),analytics:analytics||{updatedAt:null,period:null,source:null},newDraft:local?.newDraft||null};
+ return {...remote,...local,version:state?.version||local?.version||remote?.version,items,slots:mergeById(remote?.slots,local?.slots),bookings:mergeById(remote?.bookings,local?.bookings),outbox:mergeById(remote?.outbox,local?.outbox),deletedMailboxItemIds:deleted,importedMailboxInbox:compactIds([...(remote?.importedMailboxInbox||[]),...(local?.importedMailboxInbox||[])]),processedMailboxResults:compactIds([...(remote?.processedMailboxResults||[]),...(local?.processedMailboxResults||[])]),analytics:analytics||{updatedAt:null,period:null,source:null},newDraft:local?.newDraft||null,mailboxResetAt:remote?.mailboxResetAt||local?.mailboxResetAt||null};
 }
 function mailboxSnapshot(source){
  const copy=structuredClone(source);
