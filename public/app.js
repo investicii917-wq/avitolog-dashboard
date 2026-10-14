@@ -1,4 +1,4 @@
-import {installPhotoSort} from './photo-sort.js?v=1';
+import {installPhotoSort} from './photo-sort.js?v=2';
 import {CARD_STYLES,normalizeCardStyle,normalizeCardFormat,cardSpec,cardRequestKey,cardResultProblem} from './cards.js?v=2';
 
 import {readState,saveState} from './data.js?v=8';
