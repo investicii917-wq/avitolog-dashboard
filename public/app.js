@@ -1,7 +1,7 @@
 import {installPhotoSort} from './photo-sort.js?v=2';
 import {CARD_STYLES,normalizeCardStyle,normalizeCardFormat,cardSpec,cardRequestKey,cardResultProblem} from './cards.js?v=2';
 
-import {readState,saveState,readPhotoMedia} from './data.js?v=10';
+import {readState,saveState,readPhotoMedia,cachePhotoMedia} from './data.js?v=11';
 import {uid,todayKey,normalItem,receiveEvent,addSlot,addBooking,freeTimes,dayLoad,minutes,blankState} from './model.js?v=13';
 const root=document.getElementById('app');
 const CONNECTION_KEY='avitolog-mailbox-connection-v1';
@@ -89,9 +89,9 @@ function mailboxManifest(task,attachmentNames){
  if(payload.item)delete payload.item.sourcePhotos;
  return JSON.stringify({schema:'avitolog.mailbox.v1',id:task.id,type:task.type,createdAt:task.createdAt,payload,markers:task.markers||{},attachments:attachmentNames},null,2);
 }
-async function putMailboxFile(path,content,message){
+async function putMailboxFile(path,content,message,{ifMissing=false}={}){
  const current=await mailboxRequest(path),body={message,content};
- if(current.ok){const existing=await current.json();if(existing.sha)body.sha=existing.sha;}
+ if(current.ok){if(ifMissing)return;const existing=await current.json();if(existing.sha)body.sha=existing.sha;}
  else if(current.status!==404)throw Error('Не удалось проверить очередь');
  const response=await mailboxRequest(path,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
  if(!response.ok)throw Error('Не удалось передать данные в очередь');
@@ -125,33 +125,48 @@ function mergeMailboxStates(remote,local){
  const analytics=itemTime(local?.analytics)>=itemTime(remote?.analytics)?(local?.analytics||remote?.analytics):(remote?.analytics||local?.analytics);
  return {...remote,...local,version:state?.version||local?.version||remote?.version,items,slots:mergeById(remote?.slots,local?.slots),bookings:mergeById(remote?.bookings,local?.bookings),outbox:mergeById(remote?.outbox,local?.outbox),deletedMailboxItemIds:deleted,importedMailboxInbox:compactIds([...(remote?.importedMailboxInbox||[]),...(local?.importedMailboxInbox||[])]),processedMailboxResults:compactIds([...(remote?.processedMailboxResults||[]),...(local?.processedMailboxResults||[])]),analytics:analytics||{updatedAt:null,period:null,source:null},newDraft:local?.newDraft||null,mailboxResetAt:remote?.mailboxResetAt||local?.mailboxResetAt||null};
 }
-function mailboxSnapshot(source){
+const SNAPSHOT_PATH_V2='state/site-state.v2.json';
+async function snapshotPhoto(record,photo){
+ if(!photo)return photo;
+ const source=photo.src||photo.preview||'',id=String(photo.id||uid()),path=photo.mediaPath||photo.path||('media/'+record.id+'/images/'+id+'.'+fileExtension(photo));
+ if(source.startsWith('data:'))await putMailboxFile(path,dataUriBase64(source),'Store listing media',{ifMissing:true});
+ return {...photo,mediaPath:path,path,src:null,preview:null};
+}
+async function mailboxSnapshot(source){
  const copy=structuredClone(source);
  copy.outbox=[];copy.eventIds=[];copy.importedMailboxInbox=[];copy.processedMailboxResults=[];copy.newDraft=null;
- const compactPhotos=photos=>(photos||[]).map(p=>({...p,src:null,preview:p.preview||p.src||null}));
- copy.items=(copy.items||[]).map(x=>({...x,photos:compactPhotos(x.photos),sourcePhotos:compactPhotos(x.sourcePhotos),imageHistory:(x.imageHistory||[]).map(group=>({...group,photos:compactPhotos(group.photos)}))}));
- return {schema:'avitolog.state.v1',savedAt:new Date().toISOString(),state:copy};
-}
-async function syncMailboxState(loadOnly=false){
+ copy.items=await Promise.all((copy.items||[]).map(async record=>{
+  const photos=await Promise.all((record.photos||[]).map(photo=>snapshotPhoto(record,photo)));
+  const sourcePhotos=await Promise.all((record.sourcePhotos||[]).map(photo=>snapshotPhoto(record,photo)));
+  const imageHistory=await Promise.all((record.imageHistory||[]).map(async group=>({...group,photos:await Promise.all((group.photos||[]).map(photo=>snapshotPhoto(record,photo)))})));
+  return {...record,photos,sourcePhotos,imageHistory};
+ }));
+ return {schema:'avitolog.state.v2',savedAt:new Date().toISOString(),state:copy};
+}async function syncMailboxState(loadOnly=false){
  if(mailboxStateSyncing||!state||!mailboxConnection?.repo||!mailboxConnection?.accessKey)return;
  mailboxStateSyncing=true;mailboxStateFailed=false;
  try{
-  const path='state/site-state.json',response=await mailboxRequest(path);
+  let path=SNAPSHOT_PATH_V2,response=await mailboxRequest(path);
+  if(response.status===404){path='state/site-state.json';response=await mailboxRequest(path);}
   let remote=null,sha=null;
   if(response.ok){const payload=await response.json();sha=payload.sha;remote=await decodeMailboxJson(path,payload);}
   else if(response.status!==404)throw Error('Не удалось прочитать состояние');
-  if(remote?.schema==='avitolog.state.v1'&&remote.state&&loadOnly){
+  if((remote?.schema==='avitolog.state.v1'||remote?.schema==='avitolog.state.v2')&&remote.state&&loadOnly){
    state=mergeMailboxStates(remote.state,state);
-   await saveState(state);return;
+   await saveState(state);
+   if(path!==SNAPSHOT_PATH_V2)queueMailboxStateSync(5000);
+   return;
   }
   if(loadOnly)return;
-  if(remote?.schema==='avitolog.state.v1'&&remote.state){state=mergeMailboxStates(remote.state,state);await saveState(state);}
-  const body={message:'Update current Avitolog state',content:textBase64(JSON.stringify(mailboxSnapshot(state)))};if(sha)body.sha=sha;
-  const saved=await mailboxRequest(path,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  if((remote?.schema==='avitolog.state.v1'||remote?.schema==='avitolog.state.v2')&&remote.state){state=mergeMailboxStates(remote.state,state);await saveState(state);}
+  const snapshot=await mailboxSnapshot(state),targetPath=SNAPSHOT_PATH_V2,targetResponse=path===targetPath?response:await mailboxRequest(targetPath),body={message:'Update compact Avitolog state',content:textBase64(JSON.stringify(snapshot))};
+  if(targetResponse.ok){const existing=await targetResponse.json();if(existing.sha)body.sha=existing.sha;}
+  else if(targetResponse.status!==404)throw Error('Не удалось подготовить обновление состояния');
+  const saved=await mailboxRequest(targetPath,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
   if(!saved.ok&&saved.status===409)queueMailboxStateSync(1600);
+  else if(!saved.ok)throw Error('Не удалось сохранить состояние');
  }catch{mailboxStateFailed=true;}finally{mailboxStateSyncing=false;}
-}
-async function sendMailboxEvent(task){
+}async function sendMailboxEvent(task){
  const prefix=String(task.createdAt||new Date().toISOString()).replace(/\D/g,'').slice(0,14)+'-'+String(task.id).replace(/[^a-zA-Z0-9-]/g,''),photos=task.type==='cards.requested'?task.payload?.sourcePhotos:(['item.created','item.edited'].includes(task.type)?task.payload?.item?.photos:[]),attachmentNames=(photos||[]).map(()=>null);
  for(let index=0;index<photos.length;index++){
   const photo=photos[index],encoded=dataUriBase64(photo.src||photo.preview),extension=fileExtension(photo);
@@ -196,7 +211,15 @@ async function restoreMailboxPhotos(folder,photos){
  }
  return restored;
 }
-function markMailboxFile(s,folder,sha){
+async function restoreSnapshotPhoto(photo){
+ const path=photo?.mediaPath||photo?.path;
+ if(!path||mediaSrc(photo))return photo;
+ if(path.startsWith('/')||path.includes('..')||!path.split('/').every(part=>/^[a-zA-Z0-9А-Яа-яЁё_. -]+$/.test(part)))return photo;
+ const response=await mailboxRequest(path,{headers:{Accept:'application/vnd.github.raw+json'}});
+ if(!response.ok)return photo;
+ const bytes=await response.arrayBuffer();if(!bytes.byteLength)return photo;
+ return {...photo,src:await fileData(new Blob([bytes],{type:mediaType(photo)})),preview:null};
+}function markMailboxFile(s,folder,sha){
  const key=folder==='inbox'?'importedMailboxInbox':'processedMailboxResults';
  s[key]=compactIds([...(s[key]||[]),sha]);
 }
@@ -390,9 +413,10 @@ async function hydrateListingMedia(record,full){
  let changed=false;
  const hydrate=async photos=>{
   if(!(photos||[]).some(photo=>!mediaSrc(photo)))return photos;
-  const loaded=await readPhotoMedia(record.id||record.key||'new',photos,{full});
-  if(loaded.some((photo,index)=>mediaSrc(photo)!==mediaSrc(photos[index])))changed=true;
-  return loaded;
+  const listingId=record.id||record.key||'new',loaded=await readPhotoMedia(listingId,photos,{full}),resolved=await Promise.all(loaded.map(photo=>restoreSnapshotPhoto(photo)));
+  for(const photo of resolved)if(mediaSrc(photo))void cachePhotoMedia(listingId,photo);
+  if(resolved.some((photo,index)=>mediaSrc(photo)!==mediaSrc(photos[index])))changed=true;
+  return resolved;
  };
  record.photos=await hydrate(record.photos);
  record.sourcePhotos=await hydrate(record.sourcePhotos);
@@ -409,7 +433,7 @@ async function hydrateVisibleMedia(){
    const record=parts[2]==='edit'&&draft?draft:item(parts[1]);if(record)changed=await hydrateListingMedia(record,parts[2]!=='edit');
   }else if(parts[0]==='list'||!parts[0]||parts[0]==='analytics'){
    const records=(state.items||[]).filter(record=>record.photos?.[0]&&!mediaSrc(record.photos[0])).slice(0,50);
-   await Promise.all(records.map(async record=>{const original=record.photos[0],[cover]=await readPhotoMedia(record.id,[original]);if(cover&&mediaSrc(cover)!==mediaSrc(original)){record.photos=[cover,...record.photos.slice(1)];changed=true}}));
+   await Promise.all(records.map(async record=>{const original=record.photos[0],temporary={id:record.id,photos:[original],sourcePhotos:[],imageHistory:[]};if(await hydrateListingMedia(temporary,false)){record.photos=[temporary.photos[0],...record.photos.slice(1)];changed=true}}));
   }
   if(changed&&request===mediaHydrationRevision)render();
  }catch{}
