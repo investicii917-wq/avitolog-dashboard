@@ -205,7 +205,7 @@ function mergeRemoteItem(s,source,photos){
  if(index>=0&&itemTime(old)>itemTime(source))return;
  const resolvedPhotos=photos?.length?photos:(source.photos||old.photos||[]);
  const next=normalItem({...old,...source,photos:resolvedPhotos,sourcePhotos:source.sourcePhotos?.length?(photos?.length?structuredClone(photos):source.sourcePhotos):(old.sourcePhotos||[])});
- rememberPhotoSet(next,old.photos,'Все фотографии','library');archiveCurrentPhotos(next);if(index>=0)s.items[index]=next;else s.items.unshift(next);
+ next.imageHistory=[...(next.imageHistory||[]),...(old.imageHistory||[]).filter(group=>!(next.imageHistory||[]).some(value=>value.id===group.id))];rememberPhotoSet(next,old.photos,'Все фотографии','library');archiveCurrentPhotos(next);if(index>=0)s.items[index]=next;else s.items.unshift(next);
 }
 function applyMailboxEvent(s,event,photos=[]){
  const p=event?.payload||{},remote=p.item||(event?.type==='item.upsert'?p:null);
