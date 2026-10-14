@@ -378,7 +378,14 @@ function render(){
  }else root.innerHTML=listPage(parts[1]||'queue');
  }catch(e){root.innerHTML=page('Не удалось открыть страницу','/list/queue',section('<p>'+esc(e.message)+'</p>'));}
  const track=document.getElementById('gallery-track');
- if(track)track.addEventListener('scroll',()=>{galleryIndex=Math.round(track.scrollLeft/track.clientWidth);document.getElementById('gallery-counter').textContent=(galleryIndex+1)+' / '+track.children.length;},{passive:true});
+ if(track){
+  let swipe=null;
+  const moveTo=index=>{const next=Math.max(0,Math.min(track.children.length-1,index));track.scrollTo({left:next*track.clientWidth,behavior:'smooth'});};
+  track.addEventListener('scroll',()=>{galleryIndex=Math.round(track.scrollLeft/track.clientWidth);document.getElementById('gallery-counter').textContent=(galleryIndex+1)+' / '+track.children.length;},{passive:true});
+  track.addEventListener('pointerdown',event=>{if(event.pointerType==='mouse')return;swipe={id:event.pointerId,x:event.clientX,y:event.clientY};track.setPointerCapture?.(event.pointerId);});
+  track.addEventListener('pointerup',event=>{if(!swipe||swipe.id!==event.pointerId)return;const dx=event.clientX-swipe.x,dy=event.clientY-swipe.y;swipe=null;if(Math.abs(dx)>=36&&Math.abs(dx)>Math.abs(dy))moveTo(galleryIndex+(dx<0?1:-1));});
+  track.addEventListener('pointercancel',()=>{swipe=null;});
+ }
 }
 function connectionPage(){
  const saved=mailboxConnection||{};
