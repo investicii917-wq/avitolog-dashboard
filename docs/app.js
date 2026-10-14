@@ -380,7 +380,7 @@ function render(){
  const track=document.getElementById('gallery-track');
  if(track){
   let swipe=null;
-  const moveTo=index=>{const next=Math.max(0,Math.min(track.children.length-1,index));track.scrollTo({left:next*track.clientWidth,behavior:'smooth'});};
+  const moveTo=index=>{const count=track.children.length,next=((index%count)+count)%count;track.scrollTo({left:next*track.clientWidth,behavior:'smooth'});};
   track.addEventListener('scroll',()=>{galleryIndex=Math.round(track.scrollLeft/track.clientWidth);document.getElementById('gallery-counter').textContent=(galleryIndex+1)+' / '+track.children.length;},{passive:true});
   track.addEventListener('pointerdown',event=>{if(event.pointerType==='mouse')return;swipe={id:event.pointerId,x:event.clientX,y:event.clientY};track.setPointerCapture?.(event.pointerId);});
   track.addEventListener('pointerup',event=>{if(!swipe||swipe.id!==event.pointerId)return;const dx=event.clientX-swipe.x,dy=event.clientY-swipe.y;swipe=null;if(Math.abs(dx)>=36&&Math.abs(dx)>Math.abs(dy))moveTo(galleryIndex+(dx<0?1:-1));});
@@ -473,7 +473,7 @@ root.addEventListener('click',async e=>{
  if(action==='cards-toggle'){draft.generateCards=b.checked;refreshCards();queueDraftSave();return;}
  if(action.startsWith('gallery-')){
  const track=document.getElementById('gallery-track');let i=action==='gallery-at'?Number(b.dataset.index):galleryIndex+(action==='gallery-next'?1:-1);
- i=Math.max(0,Math.min(track.children.length-1,i));track.scrollTo({left:i*track.clientWidth,behavior:'smooth'});return;
+ const count=track.children.length;i=((i%count)+count)%count;track.scrollTo({left:i*track.clientWidth,behavior:'smooth'});return;
  }
  b.disabled=true;
  if(action==='delete-draft'){if(!window.confirm('Are you sure? Точно хотите удалить этот черновик?'))return;clearTimeout(draftSaveTimer);draft=null;await commit(s=>{delete s.newDraft;return s;});go('/new');toast('Черновик удалён');}
