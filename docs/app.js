@@ -104,7 +104,13 @@ function mergeMailboxStates(remote,local){
  const resetAt=remote?.mailboxResetAt;
  if(resetAt&&Date.parse(resetAt)>Date.parse(local?.mailboxResetAt||0))return resetMailboxState(local,resetAt);
  const deleted=compactIds([...(remote?.deletedMailboxItemIds||[]),...(local?.deletedMailboxItemIds||[])]);
- const items=mergeById(remote?.items,local?.items).filter(x=>!deleted.includes(x.id)).map(normalItem);
+ const remoteItems=new Map((remote?.items||[]).map(value=>[value.id,value])),localItems=new Map((local?.items||[]).map(value=>[value.id,value]));
+ const items=mergeById(remote?.items,local?.items).filter(x=>!deleted.includes(x.id)).map(value=>{
+  const remoteItem=remoteItems.get(value.id)||{},localItem=localItems.get(value.id)||{};
+  const sourceCandidates=[value.sourcePhotos,remoteItem.sourcePhotos,localItem.sourcePhotos].filter(Array.isArray),sourcePhotos=sourceCandidates.find(photos=>photos.some(mediaSrc))||sourceCandidates.find(photos=>photos.length)||[];
+  const groups=[],seen=new Set();for(const group of [...(remoteItem.imageHistory||[]),...(localItem.imageHistory||[]),...(value.imageHistory||[])]){const key=group.id||photoIds(group.photos);if(!key||seen.has(key))continue;seen.add(key);groups.push(group);}
+  return normalItem({...value,sourcePhotos,imageHistory:groups.sort((a,b)=>String(b.createdAt||'').localeCompare(String(a.createdAt||'')))});
+ });
  const analytics=itemTime(local?.analytics)>=itemTime(remote?.analytics)?(local?.analytics||remote?.analytics):(remote?.analytics||local?.analytics);
  return {...remote,...local,version:state?.version||local?.version||remote?.version,items,slots:mergeById(remote?.slots,local?.slots),bookings:mergeById(remote?.bookings,local?.bookings),outbox:mergeById(remote?.outbox,local?.outbox),deletedMailboxItemIds:deleted,importedMailboxInbox:compactIds([...(remote?.importedMailboxInbox||[]),...(local?.importedMailboxInbox||[])]),processedMailboxResults:compactIds([...(remote?.processedMailboxResults||[]),...(local?.processedMailboxResults||[])]),analytics:analytics||{updatedAt:null,period:null,source:null},newDraft:local?.newDraft||null,mailboxResetAt:remote?.mailboxResetAt||local?.mailboxResetAt||null};
 }
