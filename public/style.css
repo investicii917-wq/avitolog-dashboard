@@ -61,3 +61,13 @@ body{background:var(--bg);color:var(--ink)}.main-head,.page-head,.dock{backgroun
 .photo-drag-ghost img{display:block;width:100%;height:100%;object-fit:cover;pointer-events:none}
 
 .all-photos>.history-photos{margin-top:12px;grid-template-columns:repeat(4,minmax(0,1fr))}
+
+/* The library scrolls normally; only the selected gallery supports dragging. */
+.all-photos{padding:0;border-top:1px solid #ffffff16;border-bottom:1px solid #ffffff16}
+.all-photos>summary{list-style:none;display:flex;align-items:center;justify-content:space-between;padding:15px 0;cursor:pointer;font-size:15px;font-weight:600}
+.all-photos>summary::-webkit-details-marker{display:none}
+.all-photos-arrow{transition:transform .15s;color:var(--muted)}
+.all-photos[open] .all-photos-arrow{transform:rotate(180deg)}
+.all-photos>.history-photos{margin:0 0 14px;touch-action:pan-y}
+.all-photos .history-photos button{touch-action:pan-y;cursor:pointer;-webkit-touch-callout:none}
+.all-photos .history-photos img{-webkit-touch-callout:none;-webkit-user-select:none;user-select:none}
