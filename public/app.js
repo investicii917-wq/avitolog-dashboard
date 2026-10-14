@@ -1,7 +1,7 @@
 import {installPhotoSort} from './photo-sort.js?v=2';
 import {CARD_STYLES,normalizeCardStyle,normalizeCardFormat,cardSpec,cardRequestKey,cardResultProblem} from './cards.js?v=2';
 
-import {readState,saveState} from './data.js?v=8';
+import {readState,saveState,readPhotoMedia} from './data.js?v=10';
 import {uid,todayKey,normalItem,receiveEvent,addSlot,addBooking,freeTimes,dayLoad,minutes,blankState} from './model.js?v=13';
 const root=document.getElementById('app');
 const CONNECTION_KEY='avitolog-mailbox-connection-v1';
@@ -385,6 +385,35 @@ function bookingPage(x,offerId,params){
  return page('Назначить время','/item/'+x.id+'/offers',section('<h2>'+esc(o.buyer)+' · '+money(o.price)+'</h2><p>'+esc(x.title)+' · '+(o.method==='delivery'?'Доставка':'Самовывоз')+'</p>')+section(form),selected?'<button form="booking-form" class="btn primary" type="submit">Подтвердить встречу</button>':'');
 }
 function missing(){return page('Страница не найдена','/list/queue',section('<p>Объявление или интервал уже недоступны.</p>'));}
+let mediaHydrationRevision=0;
+async function hydrateListingMedia(record,full){
+ let changed=false;
+ const hydrate=async photos=>{
+  if(!(photos||[]).some(photo=>!mediaSrc(photo)))return photos;
+  const loaded=await readPhotoMedia(record.id||record.key||'new',photos,{full});
+  if(loaded.some((photo,index)=>mediaSrc(photo)!==mediaSrc(photos[index])))changed=true;
+  return loaded;
+ };
+ record.photos=await hydrate(record.photos);
+ record.sourcePhotos=await hydrate(record.sourcePhotos);
+ if((record.imageHistory||[]).some(group=>(group.photos||[]).some(photo=>!mediaSrc(photo))))record.imageHistory=await Promise.all(record.imageHistory.map(async group=>({...group,photos:await hydrate(group.photos)})));
+ return changed;
+}
+async function hydrateVisibleMedia(){
+ if(!state)return;
+ const request=++mediaHydrationRevision,{parts}=route();let changed=false;
+ try{
+  if(parts[0]==='new'){
+   if(draft)changed=await hydrateListingMedia(draft,false);
+  }else if(parts[0]==='item'&&parts[1]){
+   const record=parts[2]==='edit'&&draft?draft:item(parts[1]);if(record)changed=await hydrateListingMedia(record,parts[2]!=='edit');
+  }else if(parts[0]==='list'||!parts[0]||parts[0]==='analytics'){
+   const records=(state.items||[]).filter(record=>record.photos?.[0]&&!mediaSrc(record.photos[0])).slice(0,50);
+   await Promise.all(records.map(async record=>{const original=record.photos[0],[cover]=await readPhotoMedia(record.id,[original]);if(cover&&mediaSrc(cover)!==mediaSrc(original)){record.photos=[cover,...record.photos.slice(1)];changed=true}}));
+  }
+  if(changed&&request===mediaHydrationRevision)render();
+ }catch{}
+}
 function render(){
  if(!unlocked){connectionPage();return;}
  if(!state){root.innerHTML='<div class="loading">Открываем объявления…</div>';return;}
@@ -419,6 +448,7 @@ function render(){
   requestAnimationFrame(()=>jump(count*2));
  }
  installPhotoSorting();installCountReel();
+ void hydrateVisibleMedia();
 }
 function connectionPage(){
  const saved=mailboxConnection||{};
