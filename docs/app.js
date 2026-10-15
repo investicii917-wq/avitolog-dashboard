@@ -78,7 +78,7 @@ const dataUriBase64=value=>String(value||'').replace(/^data:[^;]+;base64,/,'');
 const mailboxPath=path=>'https://api.github.com/repos/'+mailboxConnection.repo.split('/').map(encodeURIComponent).join('/')+'/contents'+(path?'/'+path.split('/').map(encodeURIComponent).join('/'):'' );
 async function mailboxRequest(path,options={}){
  const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),20000);
- try{return await fetch(mailboxPath(path),{...options,headers:{Accept:'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28',Authorization:'Bearer '+mailboxConnection.accessKey,...(options.headers||{})},signal:controller.signal});}
+ try{return await fetch(mailboxPath(path),{...options,cache:'no-store',headers:{Accept:'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28',Authorization:'Bearer '+mailboxConnection.accessKey,...(options.headers||{})},signal:controller.signal});}
  finally{clearTimeout(timeout);}
 }
 function fileExtension(photo){const type=String(photo.type||'').toLowerCase();if(type.includes('png'))return 'png';if(type.includes('webp'))return 'webp';if(type.includes('gif'))return 'gif';return 'jpg';}
@@ -147,7 +147,7 @@ const repositoryPath=(repo,path='')=>'https://api.github.com/repos/'+String(repo
 
 async function repositoryRequest(repo,path,options={}){
  const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),20000);
- try{return await fetch(repositoryPath(repo,path),{...options,headers:{Accept:'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28',Authorization:'Bearer '+mailboxConnection.accessKey,...(options.headers||{})},signal:controller.signal});}
+ try{return await fetch(repositoryPath(repo,path),{...options,cache:'no-store',headers:{Accept:'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28',Authorization:'Bearer '+mailboxConnection.accessKey,...(options.headers||{})},signal:controller.signal});}
  finally{clearTimeout(timeout);}
 }
 async function putRepositoryFile(repo,path,content,message,{ifMissing=false}={}){
