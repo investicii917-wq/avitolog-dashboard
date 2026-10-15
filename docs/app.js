@@ -140,92 +140,123 @@ function mergeMailboxStates(remote,local){
  return {...remote,...local,version:state?.version||local?.version||remote?.version,items,slots:mergeById(remote?.slots,local?.slots),bookings:mergeById(remote?.bookings,local?.bookings),outbox:mergeById(remote?.outbox,local?.outbox),deletedMailboxItemIds:deleted,importedMailboxInbox:compactIds([...(remote?.importedMailboxInbox||[]),...(local?.importedMailboxInbox||[])]),processedMailboxResults:compactIds([...(remote?.processedMailboxResults||[]),...(local?.processedMailboxResults||[])]),analytics:analytics||{updatedAt:null,period:null,source:null},newDraft:local?.newDraft||null,mailboxResetAt:remote?.mailboxResetAt||local?.mailboxResetAt||null};
 }
 const mediaReference=photo=>{const copy={...photo};delete copy.src;delete copy.preview;return copy;};
-function listingDocument(record){const copy=structuredClone(record);copy.photos=(copy.photos||[]).map(mediaReference);copy.sourcePhotos=(copy.sourcePhotos||[]).map(mediaReference);copy.imageHistory=(copy.imageHistory||[]).map(group=>({...group,photos:(group.photos||[]).map(mediaReference)}));return {schemaVersion:REPOSITORY_SCHEMA,listingId:record.id,revision:record.revision||0,updatedAt:record.updatedAt||record.createdAt||null,item:copy};}
+const hubOwner=()=>String(mailboxConnection?.repo||'').split('/')[0]||'';
+const monthKey=()=>new Intl.DateTimeFormat('sv-SE',{timeZone:'Europe/Moscow',year:'numeric',month:'2-digit'}).format(new Date());
+const itemRepositoryName=record=>'item-'+String(record.id||'').toLowerCase().replace(/[^a-z0-9-]/g,'').slice(0,48)+'-'+monthKey();
+const repositoryPath=(repo,path='')=>'https://api.github.com/repos/'+String(repo).split('/').map(encodeURIComponent).join('/')+'/contents'+(path?'/'+path.split('/').map(encodeURIComponent).join('/'):'');
+
+async function repositoryRequest(repo,path,options={}){
+ const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),20000);
+ try{return await fetch(repositoryPath(repo,path),{...options,headers:{Accept:'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28',Authorization:'Bearer '+mailboxConnection.accessKey,...(options.headers||{})},signal:controller.signal});}
+ finally{clearTimeout(timeout);}
+}
+async function putRepositoryFile(repo,path,content,message,{ifMissing=false}={}){
+ const current=await repositoryRequest(repo,path),body={message,content};
+ if(current.ok){const existing=await current.json();if(ifMissing)return false;if(existing.content&&existing.encoding==='base64'&&String(existing.content).replace(/\s/g,'')===String(content).replace(/\s/g,''))return false;if(existing.sha)body.sha=existing.sha;}
+ else if(current.status!==404)throw Error('Не удалось проверить данные объявления');
+ const response=await repositoryRequest(repo,path,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+ if(!response.ok)throw Error('Не удалось сохранить данные объявления');
+ return true;
+}
+const repositoryJson=(repo,path,value,message,options={})=>putRepositoryFile(repo,path,textBase64(JSON.stringify(value,null,2)),message,options);
+
+async function ensureItemRepository(record){
+ if(record?.itemRepository)return record.itemRepository;
+ if(!record?.id||!hubOwner())throw Error('Не удалось определить объявление');
+ const target=hubOwner()+'/'+itemRepositoryName(record);
+ const payload={name:target.split('/')[1],private:true,auto_init:true,description:'Avitolog listing '+record.id};
+ let response=await fetch('https://api.github.com/user/repos',{method:'POST',headers:{Accept:'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28',Authorization:'Bearer '+mailboxConnection.accessKey,'Content-Type':'application/json'},body:JSON.stringify(payload)});
+ if(!response.ok&&response.status===422)response=await repositoryRequest(target,'');
+ if(!response.ok)throw Error('Не удалось создать репозиторий объявления. Проверьте права секретного ключа.');
+ record.itemRepository=target;record.itemMonth=monthKey();record.itemLoaded=true;
+ await repositoryJson(target,'offers.json',{schemaVersion:1,listingId:record.id,offers:record.offers||[]},'Initialize offers');
+ await repositoryJson(target,'contacts.json',{schemaVersion:1,listingId:record.id,contacts:record.chats||[]},'Initialize contacts');
+ await repositoryJson(target,'tasks/in/.gitkeep',{},'Initialize task inbox',{ifMissing:true});
+ await repositoryJson(target,'tasks/out/.gitkeep',{},'Initialize task outbox',{ifMissing:true});
+ return target;
+}
+async function itemSnapshotPhoto(record,photo,bucket,repo){
+ if(!photo)return photo;
+ const source=photo.src||photo.preview||'',id=String(photo.id||uid()),path=photo.mediaPath||photo.path||('images/'+bucket+'/'+id+'.'+fileExtension(photo));
+ if(source.startsWith('data:'))await putRepositoryFile(repo,path,dataUriBase64(source),'Store listing media');
+ return {...mediaReference(photo),mediaPath:path,path,src:null,preview:null};
+}
+async function itemDocument(record,repo){
+ const copy=structuredClone(record);
+ copy.photos=await Promise.all((copy.photos||[]).map(photo=>itemSnapshotPhoto(record,photo,record.generatedCards?'generated':'originals',repo)));
+ copy.sourcePhotos=await Promise.all((copy.sourcePhotos||[]).map(photo=>itemSnapshotPhoto(record,photo,'originals',repo)));
+ copy.imageHistory=await Promise.all((copy.imageHistory||[]).map(async group=>({...group,photos:await Promise.all((group.photos||[]).map(photo=>itemSnapshotPhoto(record,photo,group.kind==='generated'?'generated':'originals',repo)))})));
+ return {schema:'avitolog.item.v1',schemaVersion:1,listingId:record.id,revision:record.revision||0,updatedAt:record.updatedAt||record.createdAt||new Date().toISOString(),item:copy};
+}
 async function syncListingProjection(record){
- if(!record?.id)return;
- const p=listingPaths(record.id),updatedAt=record.updatedAt||record.createdAt||new Date().toISOString();
- await mailboxJson(p.item,listingDocument(record),'Update listing projection');
- await mailboxJson(p.media,mediaDocument(record),'Update listing media catalog');
- await mailboxJson(p.offers,{schemaVersion:REPOSITORY_SCHEMA,listingId:record.id,updatedAt,offers:record.offers||[]},'Update listing offers');
- await mailboxJson(p.chatIndex,{schemaVersion:REPOSITORY_SCHEMA,listingId:record.id,updatedAt,chats:record.chats||[]},'Update listing chats');
+ if(!record?.id)return null;
+ const repo=await ensureItemRepository(record),document=await itemDocument(record,repo);
+ await repositoryJson(repo,'listing.json',document,'Update listing');
+ await repositoryJson(repo,'offers.json',{schemaVersion:1,listingId:record.id,revision:record.revision||0,updatedAt:document.updatedAt,offers:record.offers||[]},'Update offers');
+ await repositoryJson(repo,'contacts.json',{schemaVersion:1,listingId:record.id,revision:record.revision||0,updatedAt:document.updatedAt,contacts:record.chats||[]},'Update contacts');
+ return {repo,document};
+}
+function hubListingRow(record,document){
+ const photo=document?.item?.photos?.[0]||{};
+ const activeOffer=(record.offers||[]).find(offer=>offer.status==='pending')||null;
+ return {listingId:record.id,title:record.title,status:record.status,price:record.price,coverPath:photo.path||photo.mediaPath||null,itemRepository:record.itemRepository,revision:record.revision||0,updatedAt:record.updatedAt||record.createdAt||null,stats:record.stats||{},activeOffer:activeOffer?{id:activeOffer.id,price:activeOffer.price,buyer:activeOffer.buyer||'',createdAt:activeOffer.createdAt||null}:null};
 }
 async function syncRepositoryProjection(snapshot){
- const source=snapshot.state,signature=JSON.stringify({items:source.items,slots:source.slots,bookings:source.bookings,analytics:source.analytics,deleted:source.deletedMailboxItemIds});
+ const source=snapshot.state,items=(source.items||[]).filter(record=>!source.deletedMailboxItemIds?.includes(record.id)),signature=JSON.stringify(items.map(record=>[record.id,record.updatedAt,record.status,record.revision,record.itemRepository]).concat([source.slots,source.bookings,source.analytics]));
  if(signature===repositoryProjectionHash)return;
- const items=source.items||[],updatedAt=items.map(x=>x.updatedAt||x.createdAt||'').sort().at(-1)||source.analytics?.updatedAt||snapshot.savedAt;
- await mailboxJson('system/schema.json',{schemaVersion:REPOSITORY_SCHEMA,updatedAt,layout:{state:'state/site-state.v2.json',inbox:'inbox',outbox:'outbox',tasks:'tasks/pending',results:'tasks/results',listings:'listings',indexes:'indexes',media:'media',analytics:'analytics',calendar:'calendar',chats:'chats'}},'Update repository schema');
- for(const record of items)await syncListingProjection(record);
- for(const status of ['queue','ready','published','archived']){const rows=items.filter(x=>x.status===status).sort((a,b)=>String(b.updatedAt||b.createdAt||'').localeCompare(String(a.updatedAt||a.createdAt||''))).map(indexRow),pages=splitPages(rows,PAGE_SIZE);await mailboxJson('indexes/'+status+'/manifest.json',{schemaVersion:REPOSITORY_SCHEMA,status,updatedAt,count:rows.length,pages:pages.map((page,index)=>({path:indexPath(status,index+1),count:page.length}))},'Update '+status+' index');for(let index=0;index<pages.length;index++)await mailboxJson(indexPath(status,index+1),{schemaVersion:REPOSITORY_SCHEMA,status,page:index+1,updatedAt,items:pages[index]},'Update '+status+' index page');}
- await mailboxJson('analytics/summary.json',{schemaVersion:REPOSITORY_SCHEMA,updatedAt,analytics:source.analytics||{},items:items.filter(x=>x.status==='published').map(indexRow)},'Update analytics summary');
- const months=new Set([...(source.slots||[]).map(x=>String(x.date||'').slice(0,7)),...(source.bookings||[]).map(x=>String(x.date||'').slice(0,7))].filter(Boolean));for(const month of months)await mailboxJson('calendar/'+month+'.json',{schemaVersion:REPOSITORY_SCHEMA,month,updatedAt,slots:(source.slots||[]).filter(x=>String(x.date||'').startsWith(month)),bookings:(source.bookings||[]).filter(x=>String(x.date||'').startsWith(month))},'Update calendar month');
+ const rows=[];
+ for(const record of items){const saved=await syncListingProjection(record);rows.push(hubListingRow(record,saved?.document));}
+ const updatedAt=rows.map(row=>row.updatedAt||'').sort().at(-1)||source.analytics?.updatedAt||snapshot.savedAt||new Date().toISOString();
+ await mailboxJson('manifest.json',{schema:'avitolog.hub.v1',schemaVersion:1,revision:Date.now(),month:monthKey(),updatedAt,listings:rows},'Update active listing manifest');
+ await mailboxJson('calendar.json',{schemaVersion:1,revision:Date.now(),updatedAt,slots:source.slots||[],bookings:source.bookings||[]},'Update calendar');
+ await mailboxJson('analytics.json',{schemaVersion:1,revision:Date.now(),updatedAt,analytics:source.analytics||{},listings:rows.filter(row=>row.status==='published').map(row=>({listingId:row.listingId,title:row.title,stats:row.stats}))},'Update analytics');
  repositoryProjectionHash=signature;
 }
-async function writeTaskProjection(task,attachmentNames=[]){if(!task?.id)return;const listingId=task.markers?.listingId||task.payload?.itemId||task.payload?.item?.id||null,payload=structuredClone(task.payload||{});if(task.type==='cards.requested'){const photos=(payload.sourcePhotos||[]).map((photo,index)=>({id:photo.id,type:photo.type||'image/jpeg',file:attachmentNames[index]||null}));payload.cardJob=cardJob(task,payload,photos);}const input={eventId:task.id,eventType:task.type,markers:task.markers||{},payload};await mailboxJson('tasks/pending/'+task.id+'.json',taskDocument({taskId:task.id,listingId,baseRevision:item(listingId)?.revision||0,action:task.markers?.action||task.type,input,createdAt:task.createdAt}),'Index pending task');}
-
-const SNAPSHOT_PATH_V2='state/site-state.v2.json';
-async function snapshotPhoto(record,photo,bucket='originals'){
- if(!photo)return photo;
- const source=photo.src||photo.preview||'',id=String(photo.id||uid()),path=photo.mediaPath||photo.path||('media/'+record.id+'/'+bucket+'/'+id+'.'+fileExtension(photo));
- if(source.startsWith('data:'))await putMailboxFile(path,dataUriBase64(source),'Store listing media');
- return {...photo,mediaPath:path,path,src:null,preview:null};
+async function writeTaskProjection(task,attachmentNames=[],repo=null){
+ if(!task?.id)return;
+ const listingId=task.markers?.listingId||task.payload?.itemId||task.payload?.item?.id||null,payload=structuredClone(task.payload||{});
+ if(task.type==='cards.requested'){const photos=(payload.sourcePhotos||[]).map((photo,index)=>({id:photo.id,type:photo.type||'image/jpeg',file:attachmentNames[index]||null}));payload.cardJob=cardJob(task,payload,photos);}
+ const input={eventId:task.id,eventType:task.type,markers:task.markers||{},payload},document=taskDocument({taskId:task.id,listingId,baseRevision:item(listingId)?.revision||0,action:task.markers?.action||task.type,input,createdAt:task.createdAt});
+ if(repo)await repositoryJson(repo,'tasks/in/'+task.id+'.json',document,'Queue listing task');
+ else await mailboxJson('inbox/'+task.id+'.json',{taskId:task.id,listingId,type:task.type,createdAt:task.createdAt},'Queue hub task');
 }
-async function mailboxSnapshot(source){
- const copy=structuredClone(source);
- copy.outbox=[];copy.eventIds=[];copy.importedMailboxInbox=[];copy.processedMailboxResults=[];copy.newDraft=null;
- copy.items=await Promise.all((copy.items||[]).map(async record=>{
-  const photos=await Promise.all((record.photos||[]).map(photo=>snapshotPhoto(record,photo,record.generatedCards?'generated':'originals')));
-  const sourcePhotos=await Promise.all((record.sourcePhotos||[]).map(photo=>snapshotPhoto(record,photo,'originals')));
-  const imageHistory=await Promise.all((record.imageHistory||[]).map(async group=>({...group,photos:await Promise.all((group.photos||[]).map(photo=>snapshotPhoto(record,photo,group.kind==='generated'?'generated':'originals')))})));
-  return {...record,photos,sourcePhotos,imageHistory};
- }));
- return {schema:'avitolog.state.v2',savedAt:new Date().toISOString(),state:copy};
-}async function syncMailboxState(loadOnly=false){
+async function readHubJson(path){
+ const response=await mailboxRequest(path);if(response.status===404)return null;if(!response.ok)throw Error('Не удалось прочитать реестр');return decodeMailboxJson(path,await response.json());
+}
+async function loadHubState(){
+ const manifest=await readHubJson('manifest.json');
+ if(!manifest||!Array.isArray(manifest.listings))return;
+ const clean=blankState();
+ clean.items=manifest.listings.map(row=>normalItem({id:row.listingId,status:row.status||'queue',title:row.title||'Новое объявление',price:row.price??null,photos:row.coverPath?[{id:'cover',path:row.coverPath,mediaPath:row.coverPath}]:[],stats:row.stats||{},offers:row.activeOffer?[row.activeOffer]:[],itemRepository:row.itemRepository||null,revision:row.revision||0,updatedAt:row.updatedAt||null,itemLoaded:false}));
+ const calendar=await readHubJson('calendar.json');if(calendar){clean.slots=calendar.slots||[];clean.bookings=calendar.bookings||[];}
+ const analytics=await readHubJson('analytics.json');if(analytics?.analytics)clean.analytics=analytics.analytics;
+ state=clean;await saveState(state);
+}
+async function syncMailboxState(loadOnly=false){
  if(mailboxStateSyncing||!state||!mailboxConnection?.repo||!mailboxConnection?.accessKey)return;
  mailboxStateSyncing=true;mailboxStateFailed=false;
- try{
-  for(let attempt=0;attempt<3;attempt++){
-   let path=SNAPSHOT_PATH_V2,response=await mailboxRequest(path);
-   if(response.status===404){path='state/site-state.json';response=await mailboxRequest(path);}
-   let remote=null,sha=null;
-   if(response.ok){const payload=await response.json();sha=payload.sha;remote=await decodeMailboxJson(path,payload);}
-   else if(response.status!==404)throw Error('Не удалось прочитать состояние');
-   if((remote?.schema==='avitolog.state.v1'||remote?.schema==='avitolog.state.v2')&&remote.state){
-    state=mergeMailboxStates(remote.state,state);await saveState(state);
-    if(loadOnly){queueMailboxStateSync(path!==SNAPSHOT_PATH_V2?5000:0);return;}
-   }else if(loadOnly)return;
-   const snapshot=await mailboxSnapshot(state),targetPath=SNAPSHOT_PATH_V2,body={message:'Update compact Avitolog state',content:textBase64(JSON.stringify(snapshot))};
-   if(path===targetPath&&sha)body.sha=sha;
-   else if(path!==targetPath){const targetResponse=await mailboxRequest(targetPath);if(targetResponse.ok){const existing=await targetResponse.json();if(existing.sha)body.sha=existing.sha;}else if(targetResponse.status!==404)throw Error('Не удалось подготовить обновление состояния');}
-   const saved=await mailboxRequest(targetPath,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-   if(saved.ok){await syncRepositoryProjection(snapshot);return;}
-   if(saved.status!==409)throw Error('Не удалось сохранить состояние');
-   await new Promise(resolve=>setTimeout(resolve,500*(attempt+1)));
-  }
-  mailboxStateFailed=true;queueMailboxStateSync(2500);
- }catch{mailboxStateFailed=true;queueMailboxStateSync(5000);}finally{mailboxStateSyncing=false;}
-}async function sendMailboxEvent(task){
- const prefix=String(task.createdAt||new Date().toISOString()).replace(/\D/g,'').slice(0,14)+'-'+String(task.id).replace(/[^a-zA-Z0-9-]/g,''),photos=task.type==='cards.requested'?task.payload?.sourcePhotos:(['item.created','item.edited'].includes(task.type)?task.payload?.item?.photos:[]),attachmentNames=(photos||[]).map(()=>null);
+ try{if(loadOnly){await loadHubState();return;}await syncRepositoryProjection({state,savedAt:new Date().toISOString()});}
+ catch{mailboxStateFailed=true;queueMailboxStateSync(5000);}
+ finally{mailboxStateSyncing=false;}
+}
+async function sendMailboxEvent(task){
+ const listingId=task.markers?.listingId||task.payload?.itemId||task.payload?.item?.id,record=item(listingId)||task.payload?.item||null,repo=record?await ensureItemRepository(record):null,prefix=String(task.createdAt||new Date().toISOString()).replace(/\D/g,'').slice(0,14)+'-'+String(task.id).replace(/[^a-zA-Z0-9-]/g,''),photos=task.type==='cards.requested'?task.payload?.sourcePhotos:(['item.created','item.edited'].includes(task.type)?task.payload?.item?.photos:[]),attachmentNames=(photos||[]).map(()=>null);
  for(let index=0;index<photos.length;index++){
-  const photo=photos[index],encoded=dataUriBase64(photo.src||photo.preview),extension=fileExtension(photo);
-  if(!encoded)continue;
+  const photo=photos[index],encoded=dataUriBase64(photo.src||photo.preview),extension=fileExtension(photo);if(!encoded)continue;
   const name=prefix+'-'+(index+1)+'-photo.'+extension;
-  await putMailboxFile('inbox/'+name,encoded,'Add attachment '+name);attachmentNames[index]=name;
+  if(repo)await putRepositoryFile(repo,'tasks/in/'+name,encoded,'Add task attachment '+name);else await putMailboxFile('inbox/'+name,encoded,'Add attachment '+name);
+  attachmentNames[index]=name;
  }
- const name=prefix+'-text.txt',manifest=mailboxManifest(task,attachmentNames);
- await putMailboxFile('inbox/'+name,textBase64(manifest),'Add announcement '+name);
- await writeTaskProjection(task,attachmentNames);
- const listingId=task.markers?.listingId||task.payload?.itemId||task.payload?.item?.id;
- try{await syncListingProjection(item(listingId)||task.payload?.item);}catch{}
+ if(repo)await writeTaskProjection(task,attachmentNames,repo);
+ await mailboxJson('inbox/'+prefix+'-command.json',{schema:'avitolog.hub-command.v1',taskId:task.id,listingId:listingId||null,type:task.type,createdAt:task.createdAt,itemRepository:repo,taskPath:repo?'tasks/in/'+task.id+'.json':null},'Add hub command');
+ if(record)await syncListingProjection(record);
+ await syncRepositoryProjection({state,savedAt:new Date().toISOString()});
 }
 async function syncMailbox(){
  if(mailboxSyncing||!state||!mailboxConnection?.repo||!mailboxConnection?.accessKey)return;
  mailboxSyncing=true;
- try{
-  for(const task of state.outbox.filter(x=>!x.deliveredAt)){
-   try{await sendMailboxEvent(task);}catch{queueMailboxSync(10000);return;}
-   await commit(s=>{const saved=s.outbox.find(x=>x.id===task.id);if(saved)saved.deliveredAt=new Date().toISOString();return s;});
-  }
- }finally{mailboxSyncing=false;if(state?.outbox.some(x=>!x.deliveredAt))queueMailboxSync(10000);}
+ try{for(const task of state.outbox.filter(x=>!x.deliveredAt)){try{await sendMailboxEvent(task);}catch{queueMailboxSync(10000);return;}await commit(s=>{const saved=s.outbox.find(x=>x.id===task.id);if(saved)saved.deliveredAt=new Date().toISOString();return s;});}}
+ finally{mailboxSyncing=false;if(state?.outbox.some(x=>!x.deliveredAt))queueMailboxSync(10000);}
 }
 const base64Text=value=>{const binary=atob(String(value||'').replace(/\s/g,'')),bytes=Uint8Array.from(binary,c=>c.charCodeAt(0));return new TextDecoder().decode(bytes);};
 async function decodeMailboxJson(path,payload){
@@ -251,11 +282,17 @@ async function restoreMailboxPhotos(folder,photos){
  }
  return restored;
 }
-async function restoreSnapshotPhoto(photo){
+async function decodeRepositoryJson(repo,path,payload){
+ if(payload.content&&payload.encoding!=='none')return JSON.parse(base64Text(payload.content));
+ const raw=await repositoryRequest(repo,path,{headers:{Accept:'application/vnd.github.raw+json'}});
+ if(!raw.ok)throw Error('Не удалось прочитать данные объявления');
+ return JSON.parse(await raw.text());
+}
+async function restoreSnapshotPhoto(photo,repo=mailboxConnection?.repo){
  const path=photo?.mediaPath||photo?.path;
- if(!path||mediaSrc(photo))return photo;
+ if(!path||mediaSrc(photo)||!repo)return photo;
  if(path.startsWith('/')||path.includes('..')||!path.split('/').every(part=>/^[a-zA-Z0-9А-Яа-яЁё_. -]+$/.test(part)))return photo;
- const response=await mailboxRequest(path,{headers:{Accept:'application/vnd.github.raw+json'}});
+ const response=await repositoryRequest(repo,path,{headers:{Accept:'application/vnd.github.raw+json'}});
  if(!response.ok)return photo;
  const bytes=await response.arrayBuffer();if(!bytes.byteLength)return photo;
  return {...photo,src:await fileData(new Blob([bytes],{type:mediaType(photo)})),preview:null};
@@ -476,11 +513,30 @@ function bookingPage(x,offerId,params){
 }
 function missing(){return page('Страница не найдена','/list/queue',section('<p>Объявление или интервал уже недоступны.</p>'));}
 let mediaHydrationRevision=0;
+const itemHydrationPending=new Map();
+async function hydrateItemRepository(record){
+ if(!record?.itemRepository||record.itemLoaded)return record;
+ if(itemHydrationPending.has(record.id))return itemHydrationPending.get(record.id);
+ const pending=(async()=>{
+  const response=await repositoryRequest(record.itemRepository,'listing.json');
+  if(!response.ok)throw Error('Не удалось загрузить объявление');
+  const document=await decodeRepositoryJson(record.itemRepository,'listing.json',await response.json());
+  const offersResponse=await repositoryRequest(record.itemRepository,'offers.json');
+  const contactsResponse=await repositoryRequest(record.itemRepository,'contacts.json');
+  const offers=offersResponse.ok?(await decodeRepositoryJson(record.itemRepository,'offers.json',await offersResponse.json())).offers||[]:[];
+  const contacts=contactsResponse.ok?(await decodeRepositoryJson(record.itemRepository,'contacts.json',await contactsResponse.json())).contacts||[]:[];
+  const merged=normalItem({...record,...(document.item||{}),offers,chats:contacts,itemRepository:record.itemRepository,itemLoaded:true});
+  const index=state.items.findIndex(value=>value.id===record.id);if(index>=0){state.items[index]=merged;await saveState(state);}
+  return merged;
+ })().finally(()=>itemHydrationPending.delete(record.id));
+ itemHydrationPending.set(record.id,pending);return pending;
+}
+
 async function hydrateListingMedia(record,full){
  let changed=false;
  const hydrate=async photos=>{
   if(!(photos||[]).some(photo=>!mediaSrc(photo)))return photos;
-  const listingId=record.id||record.key||'new',loaded=await readPhotoMedia(listingId,photos,{full}),resolved=await Promise.all(loaded.map(photo=>restoreSnapshotPhoto(photo)));
+  const listingId=record.id||record.key||'new',loaded=await readPhotoMedia(listingId,photos,{full}),resolved=await Promise.all(loaded.map(photo=>restoreSnapshotPhoto(photo,record.itemRepository||mailboxConnection?.repo)));
   for(const photo of resolved)if(mediaSrc(photo))void cachePhotoMedia(listingId,photo);
   if(resolved.some((photo,index)=>mediaSrc(photo)!==mediaSrc(photos[index])))changed=true;
   return resolved;
@@ -518,6 +574,7 @@ function render(){
  else if(parts[0]==='slot')root.innerHTML=parts[1]==='new'?slotEditor(params):schedulePage(parts[1]);
  else if(parts[0]==='item'){
  const x=item(parts[1]);
+ if(x?.itemRepository&&!x.itemLoaded){root.innerHTML='<div class="loading">Загружаем объявление…</div>';void hydrateItemRepository(x).then(()=>render()).catch(()=>{x.itemLoaded=true;render();});return;}
  root.innerHTML=!x?missing():parts[2]==='edit'?editPage(x.id):parts[2]==='comments'?commentsPage(x):parts[2]==='cards-comment'?cardCommentsPage(x):parts[2]==='offers'?offersPage(x):parts[2]==='writers'?writersPage(x):parts[2]==='chat'?chatPage(x,parts[3]):parts[2]==='book'?bookingPage(x,parts[3],params):detailPage(x);
  }else root.innerHTML=listPage(parts[1]||'queue');
  }catch(e){root.innerHTML=page('Не удалось открыть страницу','/list/queue',section('<p>'+esc(e.message)+'</p>'));}
@@ -558,9 +615,12 @@ async function connectMailbox(form){
  try{response=await mailboxRequest('inbox');}catch{mailboxConnection=previous;throw Error('Не удалось подключиться к очереди');}
  if(!response.ok){mailboxConnection=previous;throw Error(response.status===401||response.status===403?'Секретный ключ не подходит':'Очередь недоступна. Проверьте репозиторий');}
  localStorage.setItem(CONNECTION_KEY,JSON.stringify(candidate));
- unlocked=true;state=await readState();render();queueMailboxSync();queueMailboxResultSync();void syncMailboxState(true).then(()=>render());
-}
-function inlineError(message){const el=document.getElementById('form-error');if(el)el.innerHTML='<p class="inline-error">'+esc(message)+'</p>';else toast(message);}
+ unlocked=true;
+ state=previous?.repo===repo?await readState():blankState();
+ await saveState(state);
+ await syncMailboxState(true);
+ render();queueMailboxSync();queueMailboxResultSync();
+}function inlineError(message){const el=document.getElementById('form-error');if(el)el.innerHTML='<p class="inline-error">'+esc(message)+'</p>';else toast(message);}
 function prepareCardRequest(saved,existing){
  const signature=cardRequestKey(saved),previous=existing?.cardRequestKey??null;
  if(signature!==previous){saved.cardRequestKey=signature;saved.cardRequestStatus=signature?'requested':null;saved.generatedCards=null;}
@@ -723,8 +783,14 @@ root.addEventListener('paste',async e=>{
 root.addEventListener('input',e=>{if(e.target.hasAttribute('data-time-input')){const digits=e.target.value.replace(/\D/g,'').slice(0,4);e.target.value=digits.slice(0,2)+(digits.length>2?':'+digits.slice(2):'');}if(e.target.name==='cardCount'){if(draft)draft.cardCount=Math.max(1,Math.min(10,Number(e.target.value)||1));refreshCardCountNote();}if(draft?.key==='new'&&e.target.closest('#item-form'))syncNewDraft();});
 window.addEventListener('hashchange',()=>{window.scrollTo(0,0);render();});
 async function boot(){
- try{mailboxConnection=JSON.parse(localStorage.getItem(CONNECTION_KEY)||'null');unlocked=!!(mailboxConnection?.repo&&mailboxConnection?.accessKey);if(unlocked){state=await readState();queueMailboxSync();queueMailboxResultSync();void syncMailboxState(true).then(()=>render());}render();}
- catch(e){root.innerHTML='<main class="login"><div class="login-card"><h1>Не удалось открыть хранилище</h1><p>'+esc(e.message)+'</p><p>Разрешите хранение данных для сайта и обновите страницу.</p></div></main>';}
+ try{
+  mailboxConnection=JSON.parse(localStorage.getItem(CONNECTION_KEY)||'null');
+  unlocked=!!(mailboxConnection?.repo&&mailboxConnection?.accessKey);
+  if(unlocked){
+   state=await readState();
+   void syncMailboxState(true).then(()=>{render();queueMailboxSync();queueMailboxResultSync();});
+  }
+  render();
+ }catch(e){root.innerHTML='<main class="login"><div class="login-card"><h1>Не удалось открыть хранилище</h1><p>'+esc(e.message)+'</p><p>Разрешите хранение данных для сайта и обновите страницу.</p></div></main>';}
 }
 boot();
-
