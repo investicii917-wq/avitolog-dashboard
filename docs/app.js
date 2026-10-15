@@ -348,12 +348,33 @@ function priceSuggestions(d){
 }
 function getDraft(id){const key=id||'new',fresh={photos:[],sourcePhotos:[],imageHistory:[],title:'',raw:'',description:'',price:null,pickupMinutes:60,delivery:false,productKind:'single',condition:'used',defects:'',quantity:1,generateCards:false,cardStyle:'realistic',cardFormat:'auto',cardCount:5};if(!draft||draft.key!==key){draft={key,...(id?structuredClone(item(id)):structuredClone(state?.newDraft||fresh))};}return draft;}
 function productFields(d){const kind=d.productKind==='batch'?'batch':'single',condition=d.condition==='new'?'new':'used';return '<section class="section product-section"><h2>Параметры товара</h2><div class="segmented" role="radiogroup" aria-label="Тип товара"><label><input type="radio" name="productKind" value="single" '+(kind==='single'?'checked':'')+'><span>Товар 1</span></label><label><input type="radio" name="productKind" value="batch" '+(kind==='batch'?'checked':'')+'><span>Товар тиражный</span></label></div><div class="product-single '+(kind==='single'?'':'is-hidden')+'"><div class="field-label">Состояние</div><div class="segmented condition" role="radiogroup" aria-label="Состояние"><label><input type="radio" name="condition" value="used" '+(condition==='used'?'checked':'')+'><span>Б/у</span></label><label><input type="radio" name="condition" value="new" '+(condition==='new'?'checked':'')+'><span>Новое</span></label></div></div><div class="product-batch '+(kind==='batch'?'':'is-hidden')+'">'+field('Количество штук','<input name="quantity" type="number" min="1" step="1" inputmode="numeric" value="'+(Number(d.quantity)||1)+'">','Укажите, сколько одинаковых единиц есть в наличии.')+'</div>'+field('Дефекты и нюансы','<textarea name="defects" rows="3" placeholder="Если есть — опишите честно. Не попадёт в описание и карточки.">'+esc(d.defects||'')+'</textarea>')+'</section>';}
+function cardSettingsKey(d){return JSON.stringify([!!d.generateCards,normalizeCardStyle(d.cardStyle),normalizeCardFormat(d.cardFormat),Number(d.cardCount)||5]);}
+function cardsRegenerationChanged(d){
+ if(!d?.id||d.key==='new'||!d.generateCards)return false;
+ const saved=item(d.id);return !!saved&&cardSettingsKey(d)!==(saved.cardGenerationSettings||cardSettingsKey(saved));
+}
+function regenerationButton(d){return '<button type="button" id="cards-regenerate" class="btn outline block" data-action="cards-regenerate" '+(cardsRegenerationChanged(d)?'':'hidden')+'>Отправить на генерацию</button>';}
+function refreshRegenerationButton(){const button=document.getElementById('cards-regenerate');if(button)button.hidden=!cardsRegenerationChanged(draft);}
+async function requestEditedCards(button){
+ if(photoBusy)throw Error('Дождитесь загрузки фотографий');
+ if(!cardsRegenerationChanged(draft))return;
+ button.disabled=true;
+ try{
+ const id=draft.id,settings={generateCards:true,cardStyle:normalizeCardStyle(draft.cardStyle),cardFormat:normalizeCardFormat(draft.cardFormat),cardCount:Number(draft.cardCount)||5};
+ const candidate={...structuredClone(item(id)),...settings};
+ await hydrateListingMedia(candidate,true);
+ const sources=activeCardPhotos(candidate);
+ if(!sources.length||sources.some(photo=>!mediaSrc(photo)))throw Error('Дождитесь загрузки исходных фотографий');
+ await commit(s=>{const saved=s.items.find(x=>x.id===id);Object.assign(saved,settings,{updatedAt:new Date().toISOString()});saved.cardGenerationSettings=cardSettingsKey(saved);saved.cardRequestKey=cardRequestKey(candidate);saved.cardRequestStatus='requested';addOutbox(s,'cards.requested',{itemId:id,item:cardInputItem(candidate),sourcePhotos:structuredClone(sources),requestId:uid(),...cardSpec(candidate),requestKey:saved.cardRequestKey,photoIds:sources.map(p=>p.id)},{action:'cards.generate',listingId:id,cards:{...cardSpec(candidate),requestKey:saved.cardRequestKey}});return s;});
+ refreshRegenerationButton();toast('Запрос на генерацию добавлен в очередь');
+ }finally{button.disabled=false;}
+}
 function cardsHtml(d){
  const enabled=!!d.generateCards,style=normalizeCardStyle(d.cardStyle),format=normalizeCardFormat(d.cardFormat),count=Math.max(1,Math.min(10,Number(d.cardCount)||5));
  const options=Object.entries(CARD_STYLES).map(([key,value])=>'<label class="card-style-option"><input type="radio" name="cardStyle" value="'+key+'" '+(style===key?'checked':'')+'><span><b>'+value.label+'</b><small>'+value.description+'</small></span></label>').join('');
  const formats=[['portrait','3:4'],['landscape','4:3'],['auto','Подобрать по товару']].map(([key,label])=>'<label class="format-option"><input type="radio" name="cardFormat" value="'+key+'" '+(format===key?'checked':'')+'><span class="format-shape '+key+'">'+label+'</span></label>').join('');
  const example=style==='realistic'?'home':style;
- return '<section class="section cards-section"><label class="switch-row card-switch"><span><b>Создать карточки</b><small>Выберите оформление и количество изображений</small></span><input type="checkbox" name="generateCards" data-action="cards-toggle" '+(enabled?'checked':'')+'></label><div id="cards-config" class="cards-config '+(enabled?'':'is-hidden')+'"><div class="divider"></div><h2>Оформление</h2><div class="card-style-options">'+options+'</div><img class="style-example" src="./card-examples/'+example+'-01.png" alt="Пример: '+CARD_STYLES[style].label+'" loading="lazy" decoding="async"><div class="field"><span>Формат всей серии</span><div class="format-options">'+formats+'</div></div><div class="field"><span>Количество карточек</span><input type="hidden" name="cardCount" value="'+count+'"><div class="count-reel-frame"><div class="count-reel" aria-label="Количество карточек">'+Array.from({length:10},(_,i)=>'<button type="button" data-action="card-count" data-count="'+(i+1)+'" aria-pressed="'+(count===i+1)+'">'+(i+1)+'</button>').join('')+'</div></div><small id="card-count-note">В серии '+plural(count,'карточка','карточки','карточек')+'.</small></div><p class="help">Все карточки одной серии будут одного формата.</p></div></section>';
+ return '<section class="section cards-section"><label class="switch-row card-switch"><span><b>Создать карточки</b><small>Выберите оформление и количество изображений</small></span><input type="checkbox" name="generateCards" data-action="cards-toggle" '+(enabled?'checked':'')+'></label><div id="cards-config" class="cards-config '+(enabled?'':'is-hidden')+'"><div class="divider"></div><h2>Оформление</h2><div class="card-style-options">'+options+'</div><img class="style-example" src="./card-examples/'+example+'-01.png" alt="Пример: '+CARD_STYLES[style].label+'" loading="lazy" decoding="async"><div class="field"><span>Формат всей серии</span><div class="format-options">'+formats+'</div></div><div class="field"><span>Количество карточек</span><input type="hidden" name="cardCount" value="'+count+'"><div class="count-reel-frame"><div class="count-reel" aria-label="Количество карточек">'+Array.from({length:10},(_,i)=>'<button type="button" data-action="card-count" data-count="'+(i+1)+'" aria-pressed="'+(count===i+1)+'">'+(i+1)+'</button>').join('')+'</div></div><small id="card-count-note">В серии '+plural(count,'карточка','карточки','карточек')+'.</small>'+regenerationButton(d)+'</div><p class="help">Все карточки одной серии будут одного формата.</p></div></section>';
 }
 
 function unusedPhotos(d){return availableImageHistory(d)[0].photos.filter(photo=>!d.photos.some(active=>samePhoto(active,photo)));}
@@ -512,12 +533,13 @@ async function saveItem(form){
  const quantity=productKind==='batch'?(Number(f.get('quantity'))||null):null;
  const data={...(isNew?{}:item(draft.id)),id:isNew?uid():draft.id,status:isNew?'queue':draft.status,title:isNew?(raw.split(/[\n.!?]/)[0]||'Новое объявление').slice(0,50):String(f.get('title')||'').trim(),raw,description:isNew?'':String(f.get('description')||''),photos:draft.photos,imageHistory:structuredClone(draft.imageHistory||[]),price:f.get('price')===''?null:Number(f.get('price')),pickupMinutes:isNew?60:Number(f.get('pickupMinutes')),delivery:!isNew&&f.has('delivery'),productKind,condition:productKind==='single'?(f.get('condition')==='new'?'new':'used'):null,defects:String(f.get('defects')||'').trim(),quantity,generateCards:f.has('generateCards'),cardStyle:normalizeCardStyle(f.get('cardStyle')),cardFormat:normalizeCardFormat(f.get('cardFormat')),cardCount:Number(f.get('cardCount'))||1,updatedAt:new Date().toISOString()};
  const existing=isNew?null:item(draft.id);
+ if(existing)data.cardGenerationSettings=existing.cardGenerationSettings||cardSettingsKey(existing);
  if(isNew)data.sourcePhotos=structuredClone(draft.photos);
  else data.sourcePhotos=structuredClone(draft.sourcePhotos||existing?.sourcePhotos||[]);
    if(data.pickupMinutes<15||data.pickupMinutes>480)throw Error('Укажите время получения от 15 до 480 минут');
  const event={id:uid(),type:'item.upsert',payload:normalItem(data)};
  if(isNew)clearTimeout(draftSaveTimer);
- await commit(s=>{const next=receiveEvent(s,event),saved=next.items.find(x=>x.id===data.id),{signature,previous}=prepareCardRequest(saved,isNew?null:item(data.id));next.newDraft=null;addOutbox(next,isNew?'item.created':'item.edited',{itemId:data.id,item:saved},listingMarkers(saved,isNew?'listing.create':'listing.update'));if(signature&&signature!==previous)addOutbox(next,'cards.requested',{itemId:data.id,item:cardInputItem(saved),sourcePhotos:structuredClone(activeCardPhotos(saved)),requestId:uid(),...cardSpec(saved),requestKey:signature,photoIds:activeCardPhotos(saved).map(p=>p.id)},{action:'cards.generate',listingId:data.id,cards:{...cardSpec(saved),requestKey:signature}});return next;});
+ await commit(s=>{const next=receiveEvent(s,event),saved=next.items.find(x=>x.id===data.id),{signature,previous}=isNew?prepareCardRequest(saved,null):{signature:null,previous:null};next.newDraft=null;addOutbox(next,isNew?'item.created':'item.edited',{itemId:data.id,item:saved},{...listingMarkers(saved,isNew?'listing.create':'listing.update'),cards:{...cardSpec(saved),requested:isNew&&!!signature},generateImages:isNew&&!!signature});if(signature&&signature!==previous)addOutbox(next,'cards.requested',{itemId:data.id,item:cardInputItem(saved),sourcePhotos:structuredClone(activeCardPhotos(saved)),requestId:uid(),...cardSpec(saved),requestKey:signature,photoIds:activeCardPhotos(saved).map(p=>p.id)},{action:'cards.generate',listingId:data.id,cards:{...cardSpec(saved),requestKey:signature}});return next;});
  draft=null;go(isNew?'/list/ready':'/item/'+data.id);toast(isNew?'Объявление добавлено':'Изменения сохранены');
 }
 root.addEventListener('submit',async e=>{
@@ -558,6 +580,7 @@ root.addEventListener('click',async e=>{
   else {calendarReturnPath=location.hash.slice(1)||'/analytics';go('/calendar');}
   return;
  }
+ if(action==='cards-regenerate'){await requestEditedCards(b);return;}
  if(action==='card-count'){setCardCount(Number(b.dataset.count));const reel=b.closest('.count-reel');if(reel)reel.scrollTo({left:b.offsetLeft-(reel.clientWidth-b.offsetWidth)/2,behavior:'smooth'});return;}
  if(action==='photo-add'){document.getElementById('photo-files').click();return;}
  if(action==='photo-remove'){archiveCurrentPhotos(draft);const [removed]=draft.photos.splice(Number(b.dataset.index),1);if(removed)draft.imageHistory.unshift({id:uid(),label:'Все фотографии',kind:'library',createdAt:new Date().toISOString(),photos:[structuredClone(removed)]});refreshPhotos();return;}
@@ -612,7 +635,7 @@ function setCardCount(value){
  if(!draft)return;draft.cardCount=value;
  const input=document.querySelector('input[name=cardCount]');if(input)input.value=value;
  document.querySelectorAll('[data-action=card-count]').forEach(button=>button.setAttribute('aria-pressed',String(Number(button.dataset.count)===value)));
- refreshCardCountNote();queueDraftSave();
+ refreshCardCountNote();refreshRegenerationButton();queueDraftSave();
 }
 function installCountReel(){
  const reel=document.querySelector('.count-reel');if(!reel)return;
