@@ -172,27 +172,26 @@ async function mailboxSnapshot(source){
  if(mailboxStateSyncing||!state||!mailboxConnection?.repo||!mailboxConnection?.accessKey)return;
  mailboxStateSyncing=true;mailboxStateFailed=false;
  try{
-  let path=SNAPSHOT_PATH_V2,response=await mailboxRequest(path);
-  if(response.status===404){path='state/site-state.json';response=await mailboxRequest(path);}
-  let remote=null,sha=null;
-  if(response.ok){const payload=await response.json();sha=payload.sha;remote=await decodeMailboxJson(path,payload);}
-  else if(response.status!==404)throw Error('Не удалось прочитать состояние');
-  if((remote?.schema==='avitolog.state.v1'||remote?.schema==='avitolog.state.v2')&&remote.state&&loadOnly){
-   state=mergeMailboxStates(remote.state,state);
-   await saveState(state);
-   queueMailboxStateSync(path!==SNAPSHOT_PATH_V2?5000:0);
-   return;
+  for(let attempt=0;attempt<3;attempt++){
+   let path=SNAPSHOT_PATH_V2,response=await mailboxRequest(path);
+   if(response.status===404){path='state/site-state.json';response=await mailboxRequest(path);}
+   let remote=null,sha=null;
+   if(response.ok){const payload=await response.json();sha=payload.sha;remote=await decodeMailboxJson(path,payload);}
+   else if(response.status!==404)throw Error('Не удалось прочитать состояние');
+   if((remote?.schema==='avitolog.state.v1'||remote?.schema==='avitolog.state.v2')&&remote.state){
+    state=mergeMailboxStates(remote.state,state);await saveState(state);
+    if(loadOnly){queueMailboxStateSync(path!==SNAPSHOT_PATH_V2?5000:0);return;}
+   }else if(loadOnly)return;
+   const snapshot=await mailboxSnapshot(state),targetPath=SNAPSHOT_PATH_V2,body={message:'Update compact Avitolog state',content:textBase64(JSON.stringify(snapshot))};
+   if(path===targetPath&&sha)body.sha=sha;
+   else if(path!==targetPath){const targetResponse=await mailboxRequest(targetPath);if(targetResponse.ok){const existing=await targetResponse.json();if(existing.sha)body.sha=existing.sha;}else if(targetResponse.status!==404)throw Error('Не удалось подготовить обновление состояния');}
+   const saved=await mailboxRequest(targetPath,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+   if(saved.ok){await syncRepositoryProjection(snapshot);return;}
+   if(saved.status!==409)throw Error('Не удалось сохранить состояние');
+   await new Promise(resolve=>setTimeout(resolve,500*(attempt+1)));
   }
-  if(loadOnly)return;
-  if((remote?.schema==='avitolog.state.v1'||remote?.schema==='avitolog.state.v2')&&remote.state){state=mergeMailboxStates(remote.state,state);await saveState(state);}
-  const snapshot=await mailboxSnapshot(state),targetPath=SNAPSHOT_PATH_V2,body={message:'Update compact Avitolog state',content:textBase64(JSON.stringify(snapshot))};
-  if(path===targetPath&&sha)body.sha=sha;
-  else if(path!==targetPath){const targetResponse=await mailboxRequest(targetPath);if(targetResponse.ok){const existing=await targetResponse.json();if(existing.sha)body.sha=existing.sha;}else if(targetResponse.status!==404)throw Error('Не удалось подготовить обновление состояния');}
-  const saved=await mailboxRequest(targetPath,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-  if(!saved.ok&&saved.status===409)queueMailboxStateSync(1600);
-  else if(!saved.ok)throw Error('Не удалось сохранить состояние');
-  await syncRepositoryProjection(snapshot);
- }catch{mailboxStateFailed=true;}finally{mailboxStateSyncing=false;}
+  mailboxStateFailed=true;queueMailboxStateSync(2500);
+ }catch{mailboxStateFailed=true;queueMailboxStateSync(5000);}finally{mailboxStateSyncing=false;}
 }async function sendMailboxEvent(task){
  const prefix=String(task.createdAt||new Date().toISOString()).replace(/\D/g,'').slice(0,14)+'-'+String(task.id).replace(/[^a-zA-Z0-9-]/g,''),photos=task.type==='cards.requested'?task.payload?.sourcePhotos:(['item.created','item.edited'].includes(task.type)?task.payload?.item?.photos:[]),attachmentNames=(photos||[]).map(()=>null);
  for(let index=0;index<photos.length;index++){
