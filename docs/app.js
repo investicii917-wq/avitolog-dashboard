@@ -325,6 +325,7 @@ function applyMailboxEvent(s,event,photos=[]){
   archiveCurrentPhotos(record);record.cardRequestStatus='completed';record.updatedAt=event.createdAt;return;
  }
  if(event?.type==='cards.requested')return;
+  if(event?.type==='processing.reviewed'&&p.itemId){const x=s.items.find(value=>value.id===p.itemId);if(x){x.processingResult={taskId:p.taskId||null,status:p.cli?.status||null,summary:p.cli?.summary||'',checkedAt:event.createdAt||new Date().toISOString()};}return;}
 
  if(event?.type==='listing.ready'){
   const source=event.item||remote||{id:event.itemId,status:'queue',photos:event.photos||[]};
@@ -350,7 +351,7 @@ async function importMailboxFolder(folder,processedKey){
  const files=(await listResponse.json()).filter(file=>file.type==='file'&&file.name!=='.gitkeep'&&(/-text\.txt$/i.test(file.name)||/\.(json|txt)$/i.test(file.name))).sort((a,b)=>String(a.name).localeCompare(String(b.name)));
  for(const file of files){
   if(state[processedKey]?.includes(file.sha))continue;
-  let event;try{event=await readMailboxJson(folder,file);}catch{continue;}
+  let event;try{event=await readMailboxJson(folder,file);if(event?.itemRepository&&event?.resultPath){const resultResponse=await repositoryRequest(event.itemRepository,event.resultPath);if(!resultResponse.ok)continue;event=await decodeRepositoryJson(event.itemRepository,event.resultPath,await resultResponse.json());}}catch{continue;}
   const remote=event?.payload?.item||(event?.type==='item.upsert'?event.payload:null)||(event?.type==='listing.ready'?(event.item||{photos:event.photos||[]}):null);
   const incomingPhotos=event?.type==='cards.completed'?event.payload?.photos:remote?.photos;
   const photos=incomingPhotos?await restoreMailboxPhotos(folder,incomingPhotos):[];
