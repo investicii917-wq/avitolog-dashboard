@@ -130,12 +130,20 @@ function mergeMailboxStates(remote,local){
 }
 const mediaReference=photo=>{const copy={...photo};delete copy.src;delete copy.preview;return copy;};
 function listingDocument(record){const copy=structuredClone(record);copy.photos=(copy.photos||[]).map(mediaReference);copy.sourcePhotos=(copy.sourcePhotos||[]).map(mediaReference);copy.imageHistory=(copy.imageHistory||[]).map(group=>({...group,photos:(group.photos||[]).map(mediaReference)}));return {schemaVersion:REPOSITORY_SCHEMA,listingId:record.id,revision:record.revision||0,updatedAt:record.updatedAt||record.createdAt||null,item:copy};}
+async function syncListingProjection(record){
+ if(!record?.id)return;
+ const p=listingPaths(record.id),updatedAt=record.updatedAt||record.createdAt||new Date().toISOString();
+ await mailboxJson(p.item,listingDocument(record),'Update listing projection');
+ await mailboxJson(p.media,mediaDocument(record),'Update listing media catalog');
+ await mailboxJson(p.offers,{schemaVersion:REPOSITORY_SCHEMA,listingId:record.id,updatedAt,offers:record.offers||[]},'Update listing offers');
+ await mailboxJson(p.chatIndex,{schemaVersion:REPOSITORY_SCHEMA,listingId:record.id,updatedAt,chats:record.chats||[]},'Update listing chats');
+}
 async function syncRepositoryProjection(snapshot){
  const source=snapshot.state,signature=JSON.stringify({items:source.items,slots:source.slots,bookings:source.bookings,analytics:source.analytics,deleted:source.deletedMailboxItemIds});
  if(signature===repositoryProjectionHash)return;
  const items=source.items||[],updatedAt=items.map(x=>x.updatedAt||x.createdAt||'').sort().at(-1)||source.analytics?.updatedAt||snapshot.savedAt;
  await mailboxJson('system/schema.json',{schemaVersion:REPOSITORY_SCHEMA,updatedAt,layout:{state:'state/site-state.v2.json',inbox:'inbox',outbox:'outbox',tasks:'tasks/pending',results:'tasks/results',listings:'listings',indexes:'indexes',media:'media',analytics:'analytics',calendar:'calendar',chats:'chats'}},'Update repository schema');
- for(const record of items){const p=listingPaths(record.id);await mailboxJson(p.item,listingDocument(record),'Update listing projection');await mailboxJson(p.media,mediaDocument(record),'Update listing media catalog');await mailboxJson(p.offers,{schemaVersion:REPOSITORY_SCHEMA,listingId:record.id,updatedAt,offers:record.offers||[]},'Update listing offers');await mailboxJson(p.chatIndex,{schemaVersion:REPOSITORY_SCHEMA,listingId:record.id,updatedAt,chats:record.chats||[]},'Update listing chats');}
+ for(const record of items)await syncListingProjection(record);
  for(const status of ['queue','ready','published','archived']){const rows=items.filter(x=>x.status===status).sort((a,b)=>String(b.updatedAt||b.createdAt||'').localeCompare(String(a.updatedAt||a.createdAt||''))).map(indexRow),pages=splitPages(rows,PAGE_SIZE);await mailboxJson('indexes/'+status+'/manifest.json',{schemaVersion:REPOSITORY_SCHEMA,status,updatedAt,count:rows.length,pages:pages.map((page,index)=>({path:indexPath(status,index+1),count:page.length}))},'Update '+status+' index');for(let index=0;index<pages.length;index++)await mailboxJson(indexPath(status,index+1),{schemaVersion:REPOSITORY_SCHEMA,status,page:index+1,updatedAt,items:pages[index]},'Update '+status+' index page');}
  await mailboxJson('analytics/summary.json',{schemaVersion:REPOSITORY_SCHEMA,updatedAt,analytics:source.analytics||{},items:items.filter(x=>x.status==='published').map(indexRow)},'Update analytics summary');
  const months=new Set([...(source.slots||[]).map(x=>String(x.date||'').slice(0,7)),...(source.bookings||[]).map(x=>String(x.date||'').slice(0,7))].filter(Boolean));for(const month of months)await mailboxJson('calendar/'+month+'.json',{schemaVersion:REPOSITORY_SCHEMA,month,updatedAt,slots:(source.slots||[]).filter(x=>String(x.date||'').startsWith(month)),bookings:(source.bookings||[]).filter(x=>String(x.date||'').startsWith(month))},'Update calendar month');
@@ -196,6 +204,8 @@ async function mailboxSnapshot(source){
  const name=prefix+'-text.txt',manifest=mailboxManifest(task,attachmentNames);
  await putMailboxFile('inbox/'+name,textBase64(manifest),'Add announcement '+name);
  await writeTaskProjection(task);
+ const listingId=task.markers?.listingId||task.payload?.itemId||task.payload?.item?.id;
+ try{await syncListingProjection(item(listingId)||task.payload?.item);}catch{}
 }
 async function syncMailbox(){
  if(mailboxSyncing||!state||!mailboxConnection?.repo||!mailboxConnection?.accessKey)return;
