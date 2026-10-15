@@ -82,17 +82,20 @@ async function mailboxRequest(path,options={}){
  finally{clearTimeout(timeout);}
 }
 function fileExtension(photo){const type=String(photo.type||'').toLowerCase();if(type.includes('png'))return 'png';if(type.includes('webp'))return 'webp';if(type.includes('gif'))return 'gif';return 'jpg';}
+function cardJob(task,payload,photos){
+ const cards=cardSpec({generateCards:true,cardStyle:payload.style,cardFormat:payload.format,cardCount:payload.count});
+ return {contractVersion:3,taskId:task.id,listingId:payload.itemId||task.markers?.listingId||null,intent:'cards.generate',
+  style:{code:cards.style,label:cards.styleLabel,baseStyle:cards.baseStyle||cards.style},
+  series:{requestedCount:cards.count,formatCode:cards.format,formatLabel:cards.formatLabel,aspectRatio:cards.aspectRatio,aspectRatioPolicy:cards.aspectRatioPolicy,uniformAspectRatio:true},
+  source:{photoIds:photos.map(photo=>photo.id),attachments:photos.map(photo=>({photoId:photo.id,file:photo.file||null,type:photo.type})),factsSource:'listing.description-only'},
+  resultRequirements:{styleCode:cards.style,exactCount:cards.count,oneAspectRatioForWholeSeries:true,echoRequestKey:payload.requestKey,returnPhotoIds:true}};
+}
 function mailboxManifest(task,attachmentNames){
  const payload=structuredClone(task.payload||{}),photos=task.type==='cards.requested'?payload?.sourcePhotos:payload?.item?.photos;
  const manifestPhotos=Array.isArray(photos)?photos.map((photo,index)=>({id:photo.id,name:photo.name||('photo-'+(index+1)),type:photo.type||'image/jpeg',file:attachmentNames[index]||null})):[];
  if(task.type==='cards.requested'){
   payload.sourcePhotos=manifestPhotos;if(payload.item)payload.item.photos=manifestPhotos;
-  const cards={...cardSpec({generateCards:true,cardStyle:payload.style,cardFormat:payload.format,cardCount:payload.count})};
-  payload.cardJob={contractVersion:3,taskId:task.id,listingId:payload.itemId||task.markers?.listingId||null,intent:'cards.generate',
-   style:{code:cards.style,label:cards.styleLabel,baseStyle:cards.baseStyle||cards.style},
-   series:{requestedCount:cards.count,formatCode:cards.format,formatLabel:cards.formatLabel,aspectRatio:cards.aspectRatio,aspectRatioPolicy:cards.aspectRatioPolicy,uniformAspectRatio:true},
-   source:{photoIds:manifestPhotos.map(photo=>photo.id),attachments:manifestPhotos.map(photo=>({photoId:photo.id,file:photo.file,type:photo.type})),factsSource:'listing.description-only'},
-   resultRequirements:{styleCode:cards.style,exactCount:cards.count,oneAspectRatioForWholeSeries:true,echoRequestKey:payload.requestKey,returnPhotoIds:true}};
+  payload.cardJob=cardJob(task,payload,manifestPhotos);
  }
  else if(Array.isArray(photos))payload.item.photos=manifestPhotos;
  if(payload.item)delete payload.item.sourcePhotos;
@@ -157,7 +160,7 @@ async function syncRepositoryProjection(snapshot){
  const months=new Set([...(source.slots||[]).map(x=>String(x.date||'').slice(0,7)),...(source.bookings||[]).map(x=>String(x.date||'').slice(0,7))].filter(Boolean));for(const month of months)await mailboxJson('calendar/'+month+'.json',{schemaVersion:REPOSITORY_SCHEMA,month,updatedAt,slots:(source.slots||[]).filter(x=>String(x.date||'').startsWith(month)),bookings:(source.bookings||[]).filter(x=>String(x.date||'').startsWith(month))},'Update calendar month');
  repositoryProjectionHash=signature;
 }
-async function writeTaskProjection(task){if(!task?.id)return;const listingId=task.markers?.listingId||task.payload?.itemId||task.payload?.item?.id||null,input={eventId:task.id,eventType:task.type,markers:task.markers||{},payload:task.payload||{}};await mailboxJson('tasks/pending/'+task.id+'.json',taskDocument({taskId:task.id,listingId,baseRevision:item(listingId)?.revision||0,action:task.markers?.action||task.type,input,createdAt:task.createdAt}),'Index pending task');}
+async function writeTaskProjection(task,attachmentNames=[]){if(!task?.id)return;const listingId=task.markers?.listingId||task.payload?.itemId||task.payload?.item?.id||null,payload=structuredClone(task.payload||{});if(task.type==='cards.requested'){const photos=(payload.sourcePhotos||[]).map((photo,index)=>({id:photo.id,type:photo.type||'image/jpeg',file:attachmentNames[index]||null}));payload.cardJob=cardJob(task,payload,photos);}const input={eventId:task.id,eventType:task.type,markers:task.markers||{},payload};await mailboxJson('tasks/pending/'+task.id+'.json',taskDocument({taskId:task.id,listingId,baseRevision:item(listingId)?.revision||0,action:task.markers?.action||task.type,input,createdAt:task.createdAt}),'Index pending task');}
 
 const SNAPSHOT_PATH_V2='state/site-state.v2.json';
 async function snapshotPhoto(record,photo,bucket='originals'){
@@ -210,7 +213,7 @@ async function mailboxSnapshot(source){
  }
  const name=prefix+'-text.txt',manifest=mailboxManifest(task,attachmentNames);
  await putMailboxFile('inbox/'+name,textBase64(manifest),'Add announcement '+name);
- await writeTaskProjection(task);
+ await writeTaskProjection(task,attachmentNames);
  const listingId=task.markers?.listingId||task.payload?.itemId||task.payload?.item?.id;
  try{await syncListingProjection(item(listingId)||task.payload?.item);}catch{}
 }
