@@ -8,11 +8,14 @@ export const normalizeCardStyle = value => Object.hasOwn(CARD_STYLES,value) ? va
 export const normalizeCardFormat = value => ['landscape','portrait'].includes(value) ? value : 'auto';
 export const normalizeCardCount = value => Number.isInteger(Number(value)) && Number(value)>=1 && Number(value)<=10 ? Number(value) : 1;
 export function cardSpec(record) {
- const format=normalizeCardFormat(record.cardFormat), requested=!!record.generateCards;
- return {contractVersion:2,requested,style:requested?normalizeCardStyle(record.cardStyle):null,
+ const format=normalizeCardFormat(record.cardFormat),requested=!!record.generateCards;
+ const style=requested?normalizeCardStyle(record.cardStyle):null;
+ const aspectRatio=format==='landscape'?'4:3':format==='portrait'?'3:4':null;
+ return {contractVersion:3,requested,style,styleLabel:style?CARD_STYLES[style].label:null,
   count:requested?normalizeCardCount(record.cardCount):0,format,
-  aspectRatio:format==='landscape'?'4:3':format==='portrait'?'3:4':null,
-  uniformAspectRatio:true,baseStyle:record.cardStyle==='designer'?'studio':null,
+  formatLabel:format==='landscape'?'горизонтальный 4:3':format==='portrait'?'вертикальный 3:4':'подобрать по товару',
+  aspectRatio,aspectRatioPolicy:aspectRatio?'fixed':'choose-once-for-whole-series',
+  uniformAspectRatio:true,baseStyle:style==='designer'?'studio':null,
   factsSource:'listing.description-only',preserveProduct:true,
   guide:'instructions/cards/README.md'};
 }

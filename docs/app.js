@@ -1,5 +1,5 @@
 import {installPhotoSort} from './photo-sort.js?v=2';
-import {CARD_STYLES,normalizeCardStyle,normalizeCardFormat,cardSpec,cardRequestKey,cardResultProblem} from './cards.js?v=2';
+import {CARD_STYLES,normalizeCardStyle,normalizeCardFormat,cardSpec,cardRequestKey,cardResultProblem} from './cards.js?v=3';
 
 import {readState,saveState,readPhotoMedia,cachePhotoMedia} from './data.js?v=11';
 import {uid,todayKey,normalItem,receiveEvent,addSlot,addBooking,freeTimes,dayLoad,minutes,blankState} from './model.js?v=13';
@@ -85,7 +85,15 @@ function fileExtension(photo){const type=String(photo.type||'').toLowerCase();if
 function mailboxManifest(task,attachmentNames){
  const payload=structuredClone(task.payload||{}),photos=task.type==='cards.requested'?payload?.sourcePhotos:payload?.item?.photos;
  const manifestPhotos=Array.isArray(photos)?photos.map((photo,index)=>({id:photo.id,name:photo.name||('photo-'+(index+1)),type:photo.type||'image/jpeg',file:attachmentNames[index]||null})):[];
- if(task.type==='cards.requested'){payload.sourcePhotos=manifestPhotos;if(payload.item)payload.item.photos=manifestPhotos;}
+ if(task.type==='cards.requested'){
+  payload.sourcePhotos=manifestPhotos;if(payload.item)payload.item.photos=manifestPhotos;
+  const cards={...cardSpec({generateCards:true,cardStyle:payload.style,cardFormat:payload.format,cardCount:payload.count})};
+  payload.cardJob={contractVersion:3,taskId:task.id,listingId:payload.itemId||task.markers?.listingId||null,intent:'cards.generate',
+   style:{code:cards.style,label:cards.styleLabel,baseStyle:cards.baseStyle||cards.style},
+   series:{requestedCount:cards.count,formatCode:cards.format,formatLabel:cards.formatLabel,aspectRatio:cards.aspectRatio,aspectRatioPolicy:cards.aspectRatioPolicy,uniformAspectRatio:true},
+   source:{photoIds:manifestPhotos.map(photo=>photo.id),attachments:manifestPhotos.map(photo=>({photoId:photo.id,file:photo.file,type:photo.type})),factsSource:'listing.description-only'},
+   resultRequirements:{styleCode:cards.style,exactCount:cards.count,oneAspectRatioForWholeSeries:true,echoRequestKey:payload.requestKey,returnPhotoIds:true}};
+ }
  else if(Array.isArray(photos))payload.item.photos=manifestPhotos;
  if(payload.item)delete payload.item.sourcePhotos;
  return JSON.stringify({schema:'avitolog.mailbox.v1',id:task.id,type:task.type,createdAt:task.createdAt,payload,markers:task.markers||{},attachments:attachmentNames},null,2);
@@ -716,3 +724,4 @@ async function boot(){
  catch(e){root.innerHTML='<main class="login"><div class="login-card"><h1>Не удалось открыть хранилище</h1><p>'+esc(e.message)+'</p><p>Разрешите хранение данных для сайта и обновите страницу.</p></div></main>';}
 }
 boot();
+
