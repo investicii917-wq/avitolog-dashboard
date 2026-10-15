@@ -265,13 +265,12 @@ async function syncRepositoryProjectionNow(snapshot){
 }
 async function writeTaskProjection(task,attachmentNames=[],repo=null){
  if(!task?.id)return;
- const listingId=task.markers?.listingId||task.payload?.itemId||task.payload?.item?.id||null,payload=structuredClone(task.payload||{});
- if(task.type==='cards.requested'){const photos=(payload.sourcePhotos||[]).map((photo,index)=>({id:photo.id,type:photo.type||'image/jpeg',file:attachmentNames[index]||null}));payload.cardJob=cardJob(task,payload,photos);}
- const input={eventId:task.id,eventType:task.type,markers:task.markers||{},payload},document=taskDocument({taskId:task.id,listingId,baseRevision:item(listingId)?.revision||0,action:task.markers?.action||task.type,input,createdAt:task.createdAt});
+ const listingId=task.markers?.listingId||task.payload?.itemId||task.payload?.item?.id||null;
+ // В JSON задачи остаются только метаданные и имена вложений: тяжёлые data: URI сохранены отдельными файлами.
+ const input=JSON.parse(mailboxManifest(task,attachmentNames)),document=taskDocument({taskId:task.id,listingId,baseRevision:item(listingId)?.revision||0,action:task.markers?.action||task.type,input,createdAt:task.createdAt});
  if(repo)await repositoryJson(repo,'tasks/in/'+task.id+'.json',document,'Queue listing task');
  else await mailboxJson('inbox/'+task.id+'.json',{taskId:task.id,listingId,type:task.type,createdAt:task.createdAt},'Queue hub task');
-}
-async function readHubJson(path){
+}async function readHubJson(path){
  const response=await mailboxRequest(path);if(response.status===404)return null;if(!response.ok)throw Error('Не удалось прочитать реестр');return decodeMailboxJson(path,await response.json());
 }
 async function loadHubState(){
@@ -322,22 +321,23 @@ async function decodeMailboxJson(path,payload){
 }
 async function readMailboxJson(folder,file){const path=folder+'/'+file.name,response=await mailboxRequest(path);if(!response.ok)throw Error('Не удалось прочитать файл очереди');return decodeMailboxJson(path,await response.json());}
 const mediaType=photo=>photo.type||({jpg:'image/jpeg',jpeg:'image/jpeg',png:'image/png',gif:'image/gif',webp:'image/webp'}[(String(photo.path||photo.file||'').split('.').pop()||'').toLowerCase()]||'image/jpeg');
-async function restoreMailboxPhotos(folder,photos){
+async function restoreMailboxPhotos(folder,photos,repository=mailboxConnection?.repo){
  const restored=[];
  for(const photo of photos||[]){
   if(photo.src){restored.push(photo);continue;}
   const path=photo.path||[folder,photo.file].filter(Boolean).join('/');
   if(!path){restored.push(photo);continue;}
   if(path.startsWith('/')||path.includes('..')||!path.split('/').every(part=>/^[a-zA-Z0-9А-Яа-яЁё_. -]+$/.test(part)))throw Error('Некорректный путь фотографии');
-  const response=await mailboxRequest(path,{headers:{Accept:'application/vnd.github.raw+json'}});
+  const response=repository===mailboxConnection?.repo
+   ?await mailboxRequest(path,{headers:{Accept:'application/vnd.github.raw+json'}})
+   :await repositoryRequest(repository,path,{headers:{Accept:'application/vnd.github.raw+json'}});
   if(!response.ok)throw Error('Не удалось загрузить фотографию. Повторим синхронизацию.');
   const bytes=await response.arrayBuffer();
   if(!bytes.byteLength)throw Error('Получена пустая фотография');
   restored.push({...photo,src:await fileData(new Blob([bytes],{type:mediaType(photo)}))});
  }
  return restored;
-}
-async function decodeRepositoryJson(repo,path,payload){
+}async function decodeRepositoryJson(repo,path,payload){
  if(payload.content&&payload.encoding!=='none')return JSON.parse(base64Text(payload.content));
  const raw=await repositoryRequest(repo,path,{headers:{Accept:'application/vnd.github.raw+json'}});
  if(!raw.ok)throw Error('Не удалось прочитать данные объявления');
@@ -375,7 +375,13 @@ function applyMailboxEvent(s,event,photos=[]){
   archiveCurrentPhotos(record);record.cardRequestStatus='completed';record.updatedAt=event.createdAt;return;
  }
  if(event?.type==='cards.requested')return;
-  if(event?.type==='processing.reviewed'&&p.itemId){const x=s.items.find(value=>value.id===p.itemId);if(x){x.processingResult={taskId:p.taskId||null,status:p.cli?.status||null,summary:p.cli?.summary||'',checkedAt:event.createdAt||new Date().toISOString()};}return;}
+  if(event?.type==='processing.completed'&&p.itemId&&p.item){
+  mergeRemoteItem(s,p.item,photos);
+  const x=s.items.find(value=>value.id===p.itemId);
+  if(x)x.processingResult={taskId:p.taskId||null,status:'completed',summary:p.cli?.summary||'',checkedAt:event.createdAt||new Date().toISOString()};
+  return;
+ }
+ if(event?.type==='processing.reviewed'&&p.itemId){const x=s.items.find(value=>value.id===p.itemId);if(x){x.processingResult={taskId:p.taskId||null,status:p.cli?.status||null,summary:p.cli?.summary||'',checkedAt:event.createdAt||new Date().toISOString()};}return;}
 
  if(event?.type==='listing.ready'){
   const source=event.item||remote||{id:event.itemId,status:'queue',photos:event.photos||[]};
@@ -404,10 +410,10 @@ async function importMailboxFolder(folder,processedKey){
   let event;try{event=await readMailboxJson(folder,file);if(event?.itemRepository&&event?.resultPath){const resultResponse=await repositoryRequest(event.itemRepository,event.resultPath);if(!resultResponse.ok)continue;event=await decodeRepositoryJson(event.itemRepository,event.resultPath,await resultResponse.json());}}catch{continue;}
   const remote=event?.payload?.item||(event?.type==='item.upsert'?event.payload:null)||(event?.type==='listing.ready'?(event.item||{photos:event.photos||[]}):null);
   const incomingPhotos=event?.type==='cards.completed'?event.payload?.photos:remote?.photos;
-  const photos=incomingPhotos?await restoreMailboxPhotos(folder,incomingPhotos):[];
+  const photos=incomingPhotos?await restoreMailboxPhotos(folder,incomingPhotos,event?.itemRepository||mailboxConnection.repo):[];
   await commit(s=>{if(s[processedKey]?.includes(file.sha))return s;applyMailboxEvent(s,event,photos);markMailboxFile(s,folder,file.sha);return s;});
   if(folder==='outbox'&&event?.id)await mailboxJson('tasks/results/'+event.id+'.json',{schemaVersion:REPOSITORY_SCHEMA,eventId:event.id,type:event.type,listingId:event.payload?.itemId||event.itemId||event.item?.id||null,createdAt:event.createdAt||null,status:'applied'},'Index applied result');
-  if(event?.type==='listing.ready'){toast('Объявление подготовлено к публикации');render();}
+  if(event?.type==='listing.ready'||event?.type==='processing.completed'){toast('Объявление подготовлено к публикации');render();}
   if(event?.type==='cards.completed'&&state.items.find(x=>x.id===event.payload?.itemId)?.generatedCards?.requestKey===event.payload?.requestKey){toast('Карточки синхронизированы');render();}
  }
  return true;
@@ -852,3 +858,4 @@ async function boot(){
  }catch(e){root.innerHTML='<main class="login"><div class="login-card"><h1>Не удалось открыть хранилище</h1><p>'+esc(e.message)+'</p><p>Разрешите хранение данных для сайта и обновите страницу.</p></div></main>';}
 }
 boot();
+
