@@ -175,6 +175,11 @@ async function ensureItemRepository(record){
  await repositoryJson(target,'tasks/out/.gitkeep',{},'Initialize task outbox',{ifMissing:true});
  return target;
 }
+async function removeItemRepository(record){
+ if(!record?.itemRepository)return;
+ const response=await fetch('https://api.github.com/repos/'+record.itemRepository,{method:'DELETE',headers:{Accept:'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28',Authorization:'Bearer '+mailboxConnection.accessKey}});
+ if(!response.ok&&response.status!==404)throw Error('Не удалось удалить хранилище объявления. Объявление оставлено без изменений.');
+}
 async function itemSnapshotPhoto(record,photo,bucket,repo){
  if(!photo)return photo;
  const source=photo.src||photo.preview||'',id=String(photo.id||uid()),path=photo.mediaPath||photo.path||('images/'+bucket+'/'+id+'.'+fileExtension(photo));
@@ -707,7 +712,8 @@ root.addEventListener('click',async e=>{
  }else if(action==='delete-item'){
   const id=route().parts[1],x=item(id);if(!x)return;if(x.status==='published'){toast('Сначала архивируйте объявление');return;}
   if(!window.confirm('Are you sure? Точно хотите удалить это объявление?'))return;
-   await commit(s=>{s.items=s.items.filter(value=>value.id!==id);s.deletedMailboxItemIds??=[];if(!s.deletedMailboxItemIds.includes(id))s.deletedMailboxItemIds.push(id);addOutbox(s,'item.deleted',{itemId:id},{action:'listing.delete',listingId:id});return s;});
+   await removeItemRepository(x);
+    await commit(s=>{s.items=s.items.filter(value=>value.id!==id);s.deletedMailboxItemIds??=[];if(!s.deletedMailboxItemIds.includes(id))s.deletedMailboxItemIds.push(id);return s;});
   go('/list/ready');toast('Объявление удалено');
  }else if(action==='day-select'){
  const date=b.dataset.date;
