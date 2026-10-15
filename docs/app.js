@@ -353,7 +353,7 @@ function cardsRegenerationChanged(d){
  if(!d?.id||d.key==='new'||!d.generateCards)return false;
  const saved=item(d.id);return !!saved&&cardSettingsKey(d)!==(saved.cardGenerationSettings||cardSettingsKey(saved));
 }
-function regenerationButton(d){return '<button type="button" id="cards-regenerate" class="btn outline block" data-action="cards-regenerate" '+(cardsRegenerationChanged(d)?'':'hidden')+'>Отправить на генерацию</button>';}
+function regenerationButton(d){return '<button type="button" id="cards-regenerate" class="btn primary block" data-action="cards-regenerate" '+(cardsRegenerationChanged(d)?'':'hidden')+'>Создать серию карточек</button>';}
 function refreshRegenerationButton(){const button=document.getElementById('cards-regenerate');if(button)button.hidden=!cardsRegenerationChanged(draft);}
 async function requestEditedCards(button){
  if(photoBusy)throw Error('Дождитесь загрузки фотографий');
