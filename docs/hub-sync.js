@@ -1,3 +1,4 @@
+import {mergeCalendar} from './calendar.js?v=2';
 export function mergeManifest(remote, rows, deletedIds = []) {
  const deleted = new Set([...(remote?.deletedListingIds || []), ...deletedIds]);
  const entries = new Map((remote?.listings || []).map(row => [row.listingId, row]));
@@ -22,5 +23,5 @@ export function retainPendingState(remote, local) {
   outbox:(local.outbox || []).filter(task=>!deleted.has(task.markers?.listingId||task.payload?.itemId||task.payload?.item?.id)), newDraft:local.newDraft || null,
   deletedMailboxItemIds:[...deleted], processedMailboxResults:local.processedMailboxResults || [],
   importedMailboxInbox:local.importedMailboxInbox || [],
-  ...(pending.some(task => task.type?.startsWith('calendar.')) ? {slots:local.slots, bookings:local.bookings} : {})};
+  ...(pending.some(task => task.type?.startsWith('calendar.')) ? (()=>{const calendar=mergeCalendar({slots:remote.slots||[],bookings:remote.bookings||[],slotTombstones:remote.calendarSlotTombstones||[],bookingTombstones:remote.calendarBookingTombstones||[],appliedOperationIds:remote.calendarAppliedOperationIds||[],revision:remote.calendarRevision||0},{slots:local.slots||[],bookings:local.bookings||[],calendarSlotTombstones:local.calendarSlotTombstones||[],calendarBookingTombstones:local.calendarBookingTombstones||[],calendarAppliedOperationIds:local.calendarAppliedOperationIds||[]});return {slots:calendar.slots,bookings:calendar.bookings,calendarRevision:calendar.revision,calendarSlotTombstones:calendar.slotTombstones,calendarBookingTombstones:calendar.bookingTombstones,calendarAppliedOperationIds:calendar.appliedOperationIds};})() : {})};
 }

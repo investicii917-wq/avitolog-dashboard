@@ -6,6 +6,7 @@ import {webcrypto} from 'node:crypto';
 import * as hub from '../docs/hub-sync.js';
 import * as cards from '../docs/cards.js';
 import * as model from '../docs/model.js';
+import * as calendar from '../docs/calendar.js';
 import * as repo from '../docs/repository-v2.js';
 const row=(id,time='2026-10-15T00:00:00Z')=>({listingId:id,updatedAt:time});
 test('empty browser preserves remote entries',()=>assert.equal(hub.mergeManifest({listings:[row('a')]},[]).listings.length,1));
@@ -25,7 +26,7 @@ test('reload preserves unsent task and listing but not unrelated stale data',()=
 function harness(){
  const files=new Map(),requests=[],active=new Set();
  const root={addEventListener(){},innerHTML:''};
- const context=vm.createContext({...hub,...cards,...model,...repo,console,structuredClone,crypto:webcrypto,TextEncoder,TextDecoder,AbortController,URLSearchParams,Blob,
+ const context=vm.createContext({...hub,...cards,...model,...calendar,...repo,console,structuredClone,crypto:webcrypto,TextEncoder,TextDecoder,AbortController,URLSearchParams,Blob,
  document:{getElementById:()=>root},window:{addEventListener(){}},location:{hash:''},setTimeout:()=>0,clearTimeout(){},
  btoa:s=>Buffer.from(s,'binary').toString('base64'),atob:s=>Buffer.from(s,'base64').toString('binary'),
  saveState:async()=>{},readPhotoMedia:async(id,photos)=>photos,cachePhotoMedia:async()=>{}});
@@ -49,7 +50,7 @@ function harness(){
   }finally{active.delete(repository);}
  };
  let source=fs.readFileSync(new URL('../docs/app.js',import.meta.url),'utf8').replace(/^import .*;\r?\n/gm,'').replace(/\nboot\(\);\s*$/,'');
- source+='\n globalThis.api={sendMailboxEvent,syncRepositoryProjection,loadHubState,updateManifest,setup:s=>{state=s;mailboxConnection={repo:"owner/hub",accessKey:"test"}},state:()=>state};';
+ source+='\n globalThis.api={sendMailboxEvent,syncRepositoryProjection,loadHubState,updateManifest,updateCalendarProjection,setup:s=>{state=s;mailboxConnection={repo:"owner/hub",accessKey:"test"}},state:()=>state};';
  vm.runInContext(source,context);
  return {api:context.api,files,requests};
 }
@@ -73,4 +74,12 @@ test('empty device cannot overwrite full listings or registry',async()=>{
  const m=JSON.parse(Buffer.from(h.files.get('/repos/owner/hub/contents/registry/listings.json').content,'base64'));
  assert.ok(m.listings.some(x=>x.listingId==='a'));
  assert.equal(h.requests.filter(x=>x.method==='PUT'&&x.route.endsWith('/listing.json')).length,0);
+});
+
+test('pending local calendar operation merges with a fresh remote calendar',()=>{
+ const remote={items:[],slots:[{id:'remote-slot',date:'2027-03-01',from:'10:00',to:'11:00',updatedAt:'2026-10-16T10:00:00Z'}],bookings:[],calendarRevision:2};
+ const local={items:[],outbox:[{id:'operation',type:'calendar.slot.opened',markers:{}}],slots:[{id:'local-slot',date:'2027-03-02',from:'10:00',to:'11:00',updatedAt:'2026-10-16T10:01:00Z'}],bookings:[],calendarAppliedOperationIds:['operation']};
+ const merged=hub.retainPendingState(remote,local);
+ assert.deepEqual(merged.slots.map(value=>value.id).sort(),['local-slot','remote-slot']);
+ assert.ok(merged.calendarAppliedOperationIds.includes('operation'));
 });

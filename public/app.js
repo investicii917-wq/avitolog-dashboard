@@ -3,7 +3,8 @@ import {installPhotoSort} from './photo-sort.js?v=2';
 import {CARD_STYLES,normalizeCardStyle,normalizeCardFormat,cardSpec,cardRequestKey,cardResultProblem} from './cards.js?v=3';
 
 import {readState,saveState,readPhotoMedia,cachePhotoMedia} from './data.js?v=11';
-import {uid,todayKey,normalItem,receiveEvent,addSlot,addBooking,freeTimes,dayLoad,minutes,blankState} from './model.js?v=14';
+import {uid,todayKey,normalItem,receiveEvent,addSlot,addBooking,freeTimes,dayLoad,minutes,blankState} from './model.js?v=16';
+import {calendarDocument,calendarChanged,mergeCalendar,CALENDAR_SCHEMA_VERSION} from './calendar.js?v=2';
 import {REPOSITORY_SCHEMA,PAGE_SIZE,indexPath,indexRow,listingPaths,mediaDocument,splitPages,taskDocument} from './repository-v2.js?v=2';
 const root=document.getElementById('app');
 const CONNECTION_KEY='avitolog-mailbox-connection-v1';
@@ -71,8 +72,9 @@ function queueMailboxResultSync(delay=0){clearTimeout(mailboxResultTimer);mailbo
 function queueMailboxStateSync(delay=3000){clearTimeout(mailboxStateTimer);mailboxStateTimer=setTimeout(()=>{void syncMailboxState();},delay);}
 const utcStamp=()=>{const d=new Date(),p=n=>String(n).padStart(2,'0');return d.getUTCFullYear()+p(d.getUTCMonth()+1)+p(d.getUTCDate())+p(d.getUTCHours())+p(d.getUTCMinutes())+p(d.getUTCSeconds());};
 const randomPart=()=>crypto.getRandomValues(new Uint32Array(1))[0].toString(36).padStart(7,'0');
-const mailboxEvent=(type,payload,markers={})=>({schema:'avitolog.mailbox.v1',id:uid(),type,createdAt:new Date().toISOString(),payload,markers:{origin:'site',...markers}});
-const addOutbox=(s,type,payload,markers={})=>{s.outbox.push(mailboxEvent(type,payload,markers));return s;};
+const mailboxEvent=(type,payload,markers={})=>{const id=uid(),operationId=markers.operationId||(type.startsWith('calendar.')?id:null);return {schema:'avitolog.mailbox.v1',id,type,operationId,createdAt:new Date().toISOString(),payload:operationId?{...payload,operationId}:payload,markers:{origin:'site',...markers,operationId}};};
+const rememberCalendarOperation=(s,operationId)=>{if(!operationId)return true;s.calendarAppliedOperationIds??=[];if(s.calendarAppliedOperationIds.includes(operationId))return false;s.calendarAppliedOperationIds=[...s.calendarAppliedOperationIds,operationId].slice(-2000);return true;};
+const addOutbox=(s,type,payload,markers={})=>{const event=mailboxEvent(type,payload,markers);if(type.startsWith('calendar.'))rememberCalendarOperation(s,event.operationId);s.outbox.push(event);return s;};
 const listingMarkers=(record,action)=>({action,listingId:record.id,cards:cardSpec(record)});
 const textBase64=value=>{const bytes=new TextEncoder().encode(value);let binary='';for(const byte of bytes)binary+=String.fromCharCode(byte);return btoa(binary);};
 const dataUriBase64=value=>String(value||'').replace(/^data:[^;]+;base64,/,'');
@@ -245,6 +247,22 @@ function syncRepositoryProjection(snapshot){
  const job=projectionQueue.catch(()=>{}).then(()=>syncRepositoryProjectionNow(snapshot));
  projectionQueue=job;return job;
 }
+async function updateCalendarProjection(source){
+ const local=calendarDocument(source);
+ for(let attempt=0;attempt<5;attempt++){
+  const current=await mailboxRequest('calendar.json');
+  let remote=null,sha=null;
+  if(current.ok){const payload=await current.json();sha=payload.sha||null;remote=await decodeMailboxJson('calendar.json',payload);}
+  else if(current.status!==404)throw Error('Не удалось проверить календарь');
+  const merged=mergeCalendar(remote||{},local);
+  if(remote?.schemaVersion===CALENDAR_SCHEMA_VERSION&&!calendarChanged(remote,merged))return remote;
+  const body={message:'Update calendar',content:textBase64(JSON.stringify(merged,null,2))};if(sha)body.sha=sha;
+  const written=await mailboxRequest('calendar.json',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  if(written.ok)return merged;
+  if(![409,422].includes(written.status)||attempt===4)throw Error('Не удалось сохранить календарь');
+ }
+ throw Error('Не удалось сохранить календарь');
+}
 async function syncRepositoryProjectionNow(snapshot){
  const source=snapshot.state,deleted=source.deletedMailboxItemIds||[];
  const manifest=await readHubJson('registry/listings.json')||{};
@@ -260,8 +278,7 @@ async function syncRepositoryProjectionNow(snapshot){
  }
  await updateManifest(rows,deleted);
  const pending=(source.outbox||[]).filter(task=>!task.deliveredAt);
- if(pending.some(task=>task.type?.startsWith('calendar.')))
-  await mailboxJson('calendar.json',{schemaVersion:1,revision:Date.now(),updatedAt:new Date().toISOString(),slots:source.slots||[],bookings:source.bookings||[]},'Update calendar');
+ if(pending.some(task=>task.type?.startsWith('calendar.')))await updateCalendarProjection(source);
 }
 async function writeTaskProjection(task,attachmentNames=[],repo=null){
  if(!task?.id)return;
@@ -279,7 +296,7 @@ async function loadHubState(){
  const clean=blankState();
  clean.deletedMailboxItemIds=manifest.deletedListingIds||[];
  clean.items=manifest.listings.map(row=>normalItem({id:row.listingId,status:row.status||'queue',title:row.title||'Новое объявление',price:row.price??null,photos:row.coverPath?[{id:'cover',path:row.coverPath,mediaPath:row.coverPath}]:[],stats:row.stats||{},offers:row.activeOffer?[row.activeOffer]:[],itemRepository:row.itemRepository||null,revision:row.revision||0,updatedAt:row.updatedAt||null,itemLoaded:false}));
- const calendar=await readHubJson('calendar.json');if(calendar){clean.slots=calendar.slots||[];clean.bookings=calendar.bookings||[];}
+ const calendar=await readHubJson('calendar.json');if(calendar){clean.slots=calendar.slots||[];clean.bookings=calendar.bookings||[];clean.calendarRevision=Number(calendar.revision||0);clean.calendarSlotTombstones=calendar.slotTombstones||[];clean.calendarBookingTombstones=calendar.bookingTombstones||[];clean.calendarAppliedOperationIds=calendar.appliedOperationIds||[];}
  const analytics=await readHubJson('analytics.json');if(analytics?.analytics)clean.analytics=analytics.analytics;
  const job=commitQueue.then(async()=>{state=retainPendingState(clean,state||blankState());await saveState(state);});commitQueue=job.catch(()=>{});await job;
 }
@@ -396,10 +413,11 @@ function applyMailboxEvent(s,event,photos=[]){
  if(event?.type==='item.comment'&&p.itemId&&p.comment){const x=s.items.find(v=>v.id===p.itemId);if(x){x.comments??=[];const i=x.comments.findIndex(v=>v.id===p.comment.id);if(i<0)x.comments.push(p.comment);else x.comments[i]=p.comment;}return;}
  if(event?.type==='cards.comment'&&p.itemId&&p.comment){const x=s.items.find(v=>v.id===p.itemId);if(x){x.cardComments??=[];const i=x.cardComments.findIndex(v=>v.id===p.comment.id);if(i<0)x.cardComments.push(p.comment);else x.cardComments[i]=p.comment;}return;}
  if(event?.type==='offer.upsert'||event?.type==='chat.upsert'){try{Object.assign(s,receiveEvent(s,event));}catch{}return;}
- if(event?.type==='calendar.slot.opened'&&p.slot?.id){if(!s.slots.some(x=>x.id===p.slot.id))s.slots.push(p.slot);return;}
- if(event?.type==='calendar.slot.removed'&&p.slotId){s.slots=s.slots.filter(x=>x.id!==p.slotId);s.bookings=s.bookings.filter(x=>x.slotId!==p.slotId);return;}
- if(event?.type==='calendar.booking.created'&&p.booking?.id){if(!s.bookings.some(x=>x.id===p.booking.id))s.bookings.push(p.booking);return;}
- if(event?.type==='calendar.booking.cancelled'&&p.bookingId){const x=s.bookings.find(v=>v.id===p.bookingId);if(x)x.status='cancelled';return;}
+ if(event?.type?.startsWith('calendar.')&&!rememberCalendarOperation(s,p.operationId||event.operationId||event.id))return;
+ if(event?.type==='calendar.slot.opened'&&p.slot?.id){const i=s.slots.findIndex(x=>x.id===p.slot.id);if(i<0)s.slots.push(p.slot);else if(itemTime(p.slot)>=itemTime(s.slots[i]))s.slots[i]=p.slot;return;}
+ if(event?.type==='calendar.slot.removed'&&p.slotId){if(s.bookings.some(x=>x.slotId===p.slotId&&['held','scheduled','confirmed'].includes(x.status)))return;s.slots=s.slots.filter(x=>x.id!==p.slotId);s.calendarSlotTombstones??=[];s.calendarSlotTombstones.push({id:p.slotId,deletedAt:p.updatedAt||event.createdAt||new Date().toISOString()});return;}
+ if(event?.type==='calendar.booking.created'&&p.booking?.id){const i=s.bookings.findIndex(x=>x.id===p.booking.id);if(i<0)s.bookings.push(p.booking);else if(itemTime(p.booking)>=itemTime(s.bookings[i]))s.bookings[i]=p.booking;return;}
+ if(event?.type==='calendar.booking.cancelled'&&p.bookingId){const x=s.bookings.find(v=>v.id===p.bookingId);if(x){x.status='cancelled';x.updatedAt=p.updatedAt||event.createdAt||new Date().toISOString();}return;}
  if(event?.type==='analytics.snapshot'){for(const report of p.items||[]){const x=s.items.find(v=>v.id===report.itemId);if(x)x.stats={...x.stats,...report.stats,messages:report.messages??x.stats?.messages??0,offers:report.offers??x.offers?.length??0};}s.analytics={updatedAt:p.updatedAt||event.createdAt||new Date().toISOString(),period:p.period||null,source:'avito'};return;}
 }
 async function importMailboxFolder(folder,processedKey){
@@ -779,10 +797,10 @@ root.addEventListener('click',async e=>{
  render();requestAnimationFrame(()=>document.getElementById('day-panel')?.scrollIntoView({behavior:'smooth',block:'start'}));
  }else if(action==='remove-slot'){
  const id=b.dataset.id,s=state.slots.find(x=>x.id===id);
-  await commit(v=>{if(v.bookings.some(x=>x.slotId===id&&x.status!=='cancelled'))throw Error('Сначала отмените назначенные встречи');v.slots=v.slots.filter(x=>x.id!==id);addOutbox(v,'calendar.slot.removed',{slotId:id,updatedAt:new Date().toISOString()},{action:'calendar.slot.remove',slotId:id});return v;});
+  await commit(v=>{if(v.bookings.some(x=>x.slotId===id&&['held','scheduled','confirmed'].includes(x.status)))throw Error('Сначала отмените назначенные встречи');const updatedAt=new Date().toISOString();v.slots=v.slots.filter(x=>x.id!==id);v.calendarSlotTombstones??=[];v.calendarSlotTombstones.push({id,deletedAt:updatedAt});addOutbox(v,'calendar.slot.removed',{slotId:id,updatedAt},{action:'calendar.slot.remove',slotId:id});return v;});
  go('/calendar?month='+s.date.slice(0,7)+'&day='+s.date);
  }else if(action==='cancel-booking'){
- await commit(s=>{const booking=s.bookings.find(x=>x.id===b.dataset.id);booking.status='cancelled';booking.updatedAt=new Date().toISOString();const o=s.items.find(x=>x.id===booking.itemId)?.offers.find(x=>x.id===booking.offerId);if(o)o.status='pending';addOutbox(s,'calendar.booking.cancelled',{bookingId:booking.id,booking},{action:'calendar.booking.cancel',bookingId:booking.id});return s;});render();toast('Встреча отменена, время освобождено');
+ await commit(s=>{const booking=s.bookings.find(x=>x.id===b.dataset.id);const updatedAt=new Date().toISOString();booking.status='cancelled';booking.updatedAt=updatedAt;const o=s.items.find(x=>x.id===booking.itemId)?.offers.find(x=>x.id===booking.offerId);if(o)o.status='pending';addOutbox(s,'calendar.booking.cancelled',{bookingId:booking.id,booking,updatedAt},{action:'calendar.booking.cancel',bookingId:booking.id});return s;});render();toast('Встреча отменена, время освобождено');
  }
  }catch(err){toast(err.message);}finally{if(b.isConnected)b.disabled=false;}
 });

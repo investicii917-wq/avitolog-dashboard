@@ -1,4 +1,5 @@
 import {normalizeCardStyle,normalizeCardFormat} from './cards.js?v=1';
+import {assertSlot,clockMinutes,clockValue,freeStarts,validDate} from './calendar.js?v=1';
 
 export const VERSION = 5;
 export const todayKey = () => new Intl.DateTimeFormat('sv-SE', {timeZone:'Europe/Moscow',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
@@ -50,28 +51,22 @@ export function receiveEvent(state,event) {
  s.eventIds.push(event.id);return s;
 }
 export function addSlot(state,p) {
- if(!/^\d{4}-\d{2}-\d{2}$/.test(p.date)||p.date<todayKey()) throw Error('Нельзя открыть время на прошедшую дату');
+ assertSlot(p);
  const from=minutes(p.from),to=minutes(p.to);
- if(!Number.isFinite(from)||!Number.isFinite(to)||to<=from) throw Error('Время окончания должно быть позже начала');
  if(state.slots.some(s=>s.date===p.date&&minutes(s.from)<to&&minutes(s.to)>from)) throw Error('Этот интервал пересекается с уже открытым временем');
- const s=structuredClone(state);s.slots.push({...p,id:p.id||uid(),kind:p.kind==='delivery'?'delivery':'pickup'});return s;
+ const s=structuredClone(state),at=new Date().toISOString();s.slots.push({...p,id:p.id||uid(),kind:p.kind==='delivery'?'delivery':'pickup',createdAt:p.createdAt||at,updatedAt:at});return s;
 }
-export function freeTimes(state,slot,item) {
- const duration=Math.max(30,Number(item.pickupMinutes)||30),result=[];
- for(let m=minutes(slot.from);m+duration<=minutes(slot.to);m+=15){
-  if(!state.bookings.some(b=>b.date===slot.date&&b.status!=='cancelled'&&minutes(b.from)<m+duration&&minutes(b.to)>m)) result.push(toTime(m));
- }
- return result;
-}
+export function freeTimes(state,slot,item) {return freeStarts(state.slots,state.bookings,slot,item);}
 export function addBooking(state,p){
  const slot=state.slots.find(x=>x.id===p.slotId),item=state.items.find(x=>x.id===p.itemId);
- if(!slot||!item||slot.date<todayKey())throw Error('Выберите доступный интервал');
+ if(!slot||!item||!validDate(slot.date))throw Error('Выберите доступный интервал');
  if(!freeTimes(state,slot,item).includes(p.from))throw Error('В это время встреча не помещается или время уже занято');
  const offer=item.offers.find(o=>o.id===p.offerId);
- if(offer&&offer.method!==slot.kind)throw Error('Способ получения не совпадает с интервалом');
- if(offer&&offer.status!=='pending')throw Error('Это предложение уже обработано');
- const s=structuredClone(state),duration=Math.max(30,Number(item.pickupMinutes)||30);
- s.bookings.push({...p,id:uid(),date:slot.date,to:toTime(minutes(p.from)+duration),status:'scheduled',method:slot.kind});
+ if(!offer)throw Error('Для встречи требуется предложение покупателя');
+ if(offer.method!==slot.kind)throw Error('Способ получения не совпадает с интервалом');
+ if(offer.status!=='pending')throw Error('Это предложение уже обработано');
+ const s=structuredClone(state),duration=Math.max(30,Number(item.pickupMinutes)||30),at=new Date().toISOString();
+ s.bookings.push({...p,id:uid(),operationId:p.operationId||uid(),date:slot.date,to:toTime(minutes(p.from)+duration),status:'scheduled',method:slot.kind,createdAt:at,updatedAt:at});
  if(offer)s.items.find(x=>x.id===item.id).offers.find(o=>o.id===offer.id).status='accepted';
  return s;
 }
