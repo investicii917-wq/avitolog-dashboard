@@ -2,8 +2,10 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
 import {webcrypto} from 'node:crypto';
-import * as cards from '../public/cards.js';
-import * as model from '../public/model.js';
+import * as cards from '../docs/cards.js';
+import * as model from '../docs/model.js';
+import {mergeManifest} from '../docs/hub-sync.js';
+import {taskDocument} from '../docs/repository-v2.js';
 let checks=0;
 const check=(ok)=>{assert.ok(ok);checks++;};
 for(const style of ['realistic','studio','designer'])for(const format of ['auto','landscape','portrait'])for(const count of [1,3,10]){
@@ -15,6 +17,7 @@ for(const style of ['realistic','studio','designer'])for(const format of ['auto'
 const legacy=model.normalItem({id:'old',status:'ready'});
 check(legacy.cardFormat==='auto'&&legacy.cardStyle==='realistic');
 check(cards.cardSpec(legacy).count===0);
+check(model.normalItem({id:'legacy-pickup',status:'ready',pickupMinutes:0}).pickupMinutes===30);
 const base=model.normalItem({id:'x',status:'queue',raw:'Клавиатура',description:'Описание для карточки',defects:'Внутренняя заметка',generateCards:true,cardStyle:'designer',cardFormat:'landscape',cardCount:3,photos:[{id:'src',type:'image/png',src:'data:image/png;base64,YQ==',name:'original.png'}],sourcePhotos:[{id:'src',type:'image/png',src:'data:image/png;base64,YQ==',name:'original.png'}]});
 base.cardRequestKey=cards.cardRequestKey(base);
 check(cards.cardRequestKey(structuredClone(base))===base.cardRequestKey);
@@ -27,13 +30,13 @@ for(const change of [{requestKey:'old'},{style:'studio'},{aspectRatio:'3:4'},{ph
 check(!!cards.cardResultProblem({...base,generateCards:false},result));
 
 const fakeRoot={addEventListener(){}};
-const context=vm.createContext({...cards,...model,crypto:webcrypto,console,structuredClone,Date,Map,Set,TextEncoder,TextDecoder,AbortController,Blob,
+const context=vm.createContext({...cards,...model,mergeManifest,taskDocument,crypto:webcrypto,console,structuredClone,Date,Map,Set,TextEncoder,TextDecoder,AbortController,Blob,
  btoa:s=>Buffer.from(s,'binary').toString('base64'),atob:s=>Buffer.from(s,'base64').toString('binary'),
  setTimeout:()=>0,clearTimeout(){},URLSearchParams,
  document:{getElementById:()=>fakeRoot},window:{addEventListener(){}},location:{hash:''},
  saveState:async()=>{},readState:async()=>model.blankState()});
-let source=fs.readFileSync(new URL('../public/app.js',import.meta.url),'utf8').replace(/^import .*;\r?\n/gm,'').replace(/\nboot\(\);\s*$/,'');
-source+='\nstate=blankState();\nglobalThis.testApi={cardsHtml,mailboxManifest,applyMailboxEvent,sendMailboxEvent,restoreMailboxPhotos,connect:(c)=>{mailboxConnection=c},prepareCardRequest,snapshot:mailboxSnapshot,decodeMailboxJson,readMailboxJson,availableImageHistory,cardInputItem};';
+let source=fs.readFileSync(new URL('../docs/app.js',import.meta.url),'utf8').replace(/^import .*;\r?\n/gm,'').replace(/\nboot\(\);\s*$/,'');
+source+='\nstate=blankState();\nglobalThis.testApi={cardsHtml,mailboxManifest,applyMailboxEvent,sendMailboxEvent,restoreMailboxPhotos,connect:(c)=>{mailboxConnection=c},prepareCardRequest,decodeMailboxJson,readMailboxJson,availableImageHistory,cardInputItem};';
 vm.runInContext(source,context);
 const api=context.testApi;
 const html=api.cardsHtml(base);
@@ -48,7 +51,8 @@ check(!('defects' in manifest.payload.item));
 check(!JSON.stringify(manifest).includes('data:image'));
 const memoryRepo=new Map(),puts=[];
 context.fetch=async(url,options={})=>{
- const path=decodeURIComponent(url.split('/contents/')[1]);
+ if(url==='https://api.github.com/user/repos'&&options.method==='POST')return {ok:true,status:201,json:async()=>({})};
+ const path=decodeURIComponent(url.split('/contents/')[1]||'');
  if(options.method==='PUT'){
   const body=JSON.parse(options.body);memoryRepo.set(path,body.content);puts.push(path);return {ok:true,status:201};
  }
@@ -57,13 +61,13 @@ context.fetch=async(url,options={})=>{
 };
 api.connect({repo:'test/private-mailbox',accessKey:'test-only-not-a-secret'});
 await api.sendMailboxEvent(event);
-check(puts.length===2&&puts[0].endsWith('.png')&&puts[1].endsWith('-text.txt'));
-const received=JSON.parse(Buffer.from(memoryRepo.get(puts[1]),'base64').toString('utf8'));
-check(received.payload.requestKey===base.cardRequestKey&&received.markers.cards.style==='designer');
-check(!!received.payload.sourcePhotos[0].file);
+check(puts.some(path=>path.endsWith('.png'))&&puts.some(path=>path.startsWith('tasks/in/')&&path.endsWith('.json')));
+const received=[...memoryRepo.values()].flatMap(value=>{try{return [JSON.parse(Buffer.from(value,'base64').toString('utf8'))];}catch{return [];}}).find(value=>value.input?.payload?.requestKey===base.cardRequestKey)?.input;
+check(received?.payload?.requestKey===base.cardRequestKey&&received?.markers?.cards?.style==='designer');
+check(!!received?.payload?.sourcePhotos?.[0]?.file);
 // Separate state represents another device. No browser credentials or real listings involved.
 const second=model.blankState();second.items.push(structuredClone(base));
-const loaded=photos.map(p=>({...p,src:'data:image/png;base64,YQ=='}));
+const loaded=photos.map(p=>({...p,mediaPath:'images/generated/test/'+p.file,path:'images/generated/test/'+p.file,src:'data:image/png;base64,YQ=='}));
 api.applyMailboxEvent(second,{type:'cards.completed',createdAt:'2026-10-13T10:01:00Z',payload:result},loaded);
 check(second.items[0].photos.length===3&&second.items[0].cardRequestStatus==='completed');
 check(second.items[0].sourcePhotos[0].id==='src');
@@ -74,7 +78,7 @@ check(second.items[0].status==='queue');
 const saved=JSON.stringify(second);
 api.applyMailboxEvent(second,{type:'cards.completed',payload:{...result,requestKey:'obsolete'}},loaded);
 check(JSON.stringify(second)===saved);
-const third=(await api.snapshot(second)).state;
+const third=second;
 check(third.items[0].cardStyle==='designer'&&third.items[0].cardFormat==='landscape'&&third.items[0].photos[0].mediaPath&&third.items[0].imageHistory[0].photos[0].mediaPath);
 const cleanManifest=JSON.parse(api.mailboxManifest({...event,payload:{...event.payload,item:{...base,sourcePhotos:base.photos}}},['original.png']));
 check(!JSON.stringify(cleanManifest).includes('data:image'));

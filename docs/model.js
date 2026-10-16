@@ -16,7 +16,8 @@ export function normalItem(x) {
  const quantity=Number.isInteger(suppliedQuantity)&&suppliedQuantity>=1?suppliedQuantity:null;
  const suppliedCardCount=Number(x.cardCount);
  const cardCount=Number.isInteger(suppliedCardCount)&&suppliedCardCount>=1&&suppliedCardCount<=10?suppliedCardCount:1;
- return {title:'Новое объявление',raw:'',description:'',photos:[],sourcePhotos:[],imageHistory:[],comments:[],cardComments:[],chats:[],price:null,fast:null,optimal:null,slow:null,pickupMinutes:60,delivery:false,stats:{views:0,favorites:0,contacts:0,messages:0,offers:0},offers:[],createdAt:new Date().toISOString(),productKind:'single',condition:'used',size:'',defects:'',quantity:null,generateCards:false,cardStyle:'realistic',cardCount:1,cardRequestKey:null,cardRequestStatus:null,...x,price,title:String(x.title||'Новое объявление').slice(0,50),productKind,condition:productKind==='single'?(x.condition==='new'?'new':'used'):null,size:String(x.size||'').slice(0,120),defects:String(x.defects||''),quantity,generateCards:!!x.generateCards,cardStyle:normalizeCardStyle(x.cardStyle),cardFormat:normalizeCardFormat(x.cardFormat),cardCount,photos:Array.isArray(x.photos)?x.photos:[],sourcePhotos:Array.isArray(x.sourcePhotos)?x.sourcePhotos:[],imageHistory:Array.isArray(x.imageHistory)?x.imageHistory:[],stats:{views:0,favorites:0,contacts:0,messages:0,offers:0,...(x.stats||{})},chats:Array.isArray(x.chats)?x.chats:[],comments:Array.isArray(x.comments)?x.comments:[],cardComments:Array.isArray(x.cardComments)?x.cardComments:[]};
+ const pickupMinutes=Math.max(30,Number(x.pickupMinutes)||30);
+ return {title:'Новое объявление',raw:'',description:'',photos:[],sourcePhotos:[],imageHistory:[],comments:[],cardComments:[],chats:[],price:null,fast:null,optimal:null,slow:null,pickupMinutes:30,delivery:false,stats:{views:0,favorites:0,contacts:0,messages:0,offers:0},offers:[],createdAt:new Date().toISOString(),productKind:'single',condition:'used',size:'',defects:'',quantity:null,generateCards:false,cardStyle:'realistic',cardCount:1,cardRequestKey:null,cardRequestStatus:null,...x,price,pickupMinutes,title:String(x.title||'Новое объявление').slice(0,50),productKind,condition:productKind==='single'?(x.condition==='new'?'new':'used'):null,size:String(x.size||'').slice(0,120),defects:String(x.defects||''),quantity,generateCards:!!x.generateCards,cardStyle:normalizeCardStyle(x.cardStyle),cardFormat:normalizeCardFormat(x.cardFormat),cardCount,photos:Array.isArray(x.photos)?x.photos:[],sourcePhotos:Array.isArray(x.sourcePhotos)?x.sourcePhotos:[],imageHistory:Array.isArray(x.imageHistory)?x.imageHistory:[],stats:{views:0,favorites:0,contacts:0,messages:0,offers:0,...(x.stats||{})},chats:Array.isArray(x.chats)?x.chats:[],comments:Array.isArray(x.comments)?x.comments:[],cardComments:Array.isArray(x.cardComments)?x.cardComments:[]};
 }
 export function receiveEvent(state,event) {
  if(!event || !event.id || !event.type) throw Error('У события должны быть id и type');
@@ -56,7 +57,7 @@ export function addSlot(state,p) {
  const s=structuredClone(state);s.slots.push({...p,id:p.id||uid(),kind:p.kind==='delivery'?'delivery':'pickup'});return s;
 }
 export function freeTimes(state,slot,item) {
- const duration=Number(item.pickupMinutes)||60,result=[];
+ const duration=Math.max(30,Number(item.pickupMinutes)||30),result=[];
  for(let m=minutes(slot.from);m+duration<=minutes(slot.to);m+=15){
   if(!state.bookings.some(b=>b.date===slot.date&&b.status!=='cancelled'&&minutes(b.from)<m+duration&&minutes(b.to)>m)) result.push(toTime(m));
  }
@@ -69,7 +70,7 @@ export function addBooking(state,p){
  const offer=item.offers.find(o=>o.id===p.offerId);
  if(offer&&offer.method!==slot.kind)throw Error('Способ получения не совпадает с интервалом');
  if(offer&&offer.status!=='pending')throw Error('Это предложение уже обработано');
- const s=structuredClone(state),duration=Number(item.pickupMinutes)||60;
+ const s=structuredClone(state),duration=Math.max(30,Number(item.pickupMinutes)||30);
  s.bookings.push({...p,id:uid(),date:slot.date,to:toTime(minutes(p.from)+duration),status:'scheduled',method:slot.kind});
  if(offer)s.items.find(x=>x.id===item.id).offers.find(o=>o.id===offer.id).status='accepted';
  return s;

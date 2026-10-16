@@ -70,7 +70,7 @@ export function addBooking(state,p){
  const offer=item.offers.find(o=>o.id===p.offerId);
  if(offer&&offer.method!==slot.kind)throw Error('Способ получения не совпадает с интервалом');
  if(offer&&offer.status!=='pending')throw Error('Это предложение уже обработано');
- const s=structuredClone(state),duration=Number(item.pickupMinutes)||60;
+ const s=structuredClone(state),duration=Math.max(30,Number(item.pickupMinutes)||30);
  s.bookings.push({...p,id:uid(),date:slot.date,to:toTime(minutes(p.from)+duration),status:'scheduled',method:slot.kind});
  if(offer)s.items.find(x=>x.id===item.id).offers.find(o=>o.id===offer.id).status='accepted';
  return s;

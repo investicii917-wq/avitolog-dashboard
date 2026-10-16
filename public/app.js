@@ -1,11 +1,13 @@
+import {mergeManifest,retainPendingState} from './hub-sync.js?v=1';
 import {installPhotoSort} from './photo-sort.js?v=2';
-import {CARD_STYLES,normalizeCardStyle,normalizeCardFormat,cardSpec,cardRequestKey,cardResultProblem} from './cards.js?v=2';
+import {CARD_STYLES,normalizeCardStyle,normalizeCardFormat,cardSpec,cardRequestKey,cardResultProblem} from './cards.js?v=3';
 
 import {readState,saveState,readPhotoMedia,cachePhotoMedia} from './data.js?v=11';
-import {uid,todayKey,normalItem,receiveEvent,addSlot,addBooking,freeTimes,dayLoad,minutes,blankState} from './model.js?v=13';
+import {uid,todayKey,normalItem,receiveEvent,addSlot,addBooking,freeTimes,dayLoad,minutes,blankState} from './model.js?v=14';
+import {REPOSITORY_SCHEMA,PAGE_SIZE,indexPath,indexRow,listingPaths,mediaDocument,splitPages,taskDocument} from './repository-v2.js?v=2';
 const root=document.getElementById('app');
 const CONNECTION_KEY='avitolog-mailbox-connection-v1';
-let state,unlocked=false,mailboxConnection=null,draft=null,galleryIndex=0,toastTimer,photoBusy=false,photoSortSuppressClick=false,commitQueue=Promise.resolve(),mailboxSyncing=false,mailboxSyncTimer,mailboxResultSyncing=false,mailboxResultTimer,mailboxStateTimer,mailboxStateSyncing=false,mailboxStateFailed=false,calendarReturnPath='/analytics';
+let state,unlocked=false,mailboxConnection=null,draft=null,galleryIndex=0,toastTimer,photoBusy=false,photoSortSuppressClick=false,commitQueue=Promise.resolve(),mailboxSyncing=false,mailboxSyncTimer,mailboxResultSyncing=false,mailboxResultTimer,mailboxStateTimer,mailboxStateSyncing=false,mailboxStateFailed=false,calendarReturnPath='/analytics',repositoryProjectionHash='';
 const SITE_REFRESH_INTERVAL=5*60*1000,PROCESSED_FILE_LIMIT=1500;
 const icons={
  back:'<path d="m15 5-7 7 7 7"/>',close:'<path d="m6 6 12 12M18 6 6 18"/>',
@@ -77,25 +79,65 @@ const dataUriBase64=value=>String(value||'').replace(/^data:[^;]+;base64,/,'');
 const mailboxPath=path=>'https://api.github.com/repos/'+mailboxConnection.repo.split('/').map(encodeURIComponent).join('/')+'/contents'+(path?'/'+path.split('/').map(encodeURIComponent).join('/'):'' );
 async function mailboxRequest(path,options={}){
  const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),20000);
- try{return await fetch(mailboxPath(path),{...options,headers:{Accept:'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28',Authorization:'Bearer '+mailboxConnection.accessKey,...(options.headers||{})},signal:controller.signal});}
+ try{return await fetch(mailboxPath(path),{...options,cache:'no-store',headers:{Accept:'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28',Authorization:'Bearer '+mailboxConnection.accessKey,...(options.headers||{})},signal:controller.signal});}
  finally{clearTimeout(timeout);}
 }
 function fileExtension(photo){const type=String(photo.type||'').toLowerCase();if(type.includes('png'))return 'png';if(type.includes('webp'))return 'webp';if(type.includes('gif'))return 'gif';return 'jpg';}
+function cardJob(task,payload,photos){
+ const cards=cardSpec({generateCards:true,cardStyle:payload.style,cardFormat:payload.format,cardCount:payload.count});
+ return {contractVersion:3,taskId:task.id,listingId:payload.itemId||task.markers?.listingId||null,intent:'cards.generate',
+  style:{code:cards.style,label:cards.styleLabel,baseStyle:cards.baseStyle||cards.style},
+  series:{requestedCount:cards.count,formatCode:cards.format,formatLabel:cards.formatLabel,aspectRatio:cards.aspectRatio,aspectRatioPolicy:cards.aspectRatioPolicy,uniformAspectRatio:true},
+  source:{photoIds:photos.map(photo=>photo.id),attachments:photos.map(photo=>({photoId:photo.id,file:photo.file||null,type:photo.type})),factsSource:'listing.description-only'},
+  resultRequirements:{styleCode:cards.style,exactCount:cards.count,oneAspectRatioForWholeSeries:true,echoRequestKey:payload.requestKey,returnPhotoIds:true}};
+}
 function mailboxManifest(task,attachmentNames){
  const payload=structuredClone(task.payload||{}),photos=task.type==='cards.requested'?payload?.sourcePhotos:payload?.item?.photos;
  const manifestPhotos=Array.isArray(photos)?photos.map((photo,index)=>({id:photo.id,name:photo.name||('photo-'+(index+1)),type:photo.type||'image/jpeg',file:attachmentNames[index]||null})):[];
- if(task.type==='cards.requested'){payload.sourcePhotos=manifestPhotos;if(payload.item)payload.item.photos=manifestPhotos;}
+ if(task.type==='cards.requested'){
+  payload.sourcePhotos=manifestPhotos;if(payload.item)payload.item.photos=manifestPhotos;
+  payload.cardJob=cardJob(task,payload,manifestPhotos);
+ }
  else if(Array.isArray(photos))payload.item.photos=manifestPhotos;
  if(payload.item)delete payload.item.sourcePhotos;
  return JSON.stringify({schema:'avitolog.mailbox.v1',id:task.id,type:task.type,createdAt:task.createdAt,payload,markers:task.markers||{},attachments:attachmentNames},null,2);
 }
-async function putMailboxFile(path,content,message,{ifMissing=false}={}){
+function putMailboxFile(path,content,message,options={}){return queueRepositoryWrite(mailboxConnection.repo,()=>putMailboxFileNow(path,content,message,options));}
+const repositoryWrites=new Map();
+function queueRepositoryWrite(repo,operation){
+ const previous=repositoryWrites.get(repo)||Promise.resolve();
+ const next=previous.catch(()=>{}).then(operation);
+ repositoryWrites.set(repo,next);
+ return next;
+}
+async function updateManifest(rows,deletedIds=[]){
+ return queueRepositoryWrite(mailboxConnection.repo,async()=>{
+  for(let attempt=0;attempt<5;attempt++){
+   const response=await mailboxRequest('registry/listings.json');
+   if(!response.ok&&response.status!==404)throw Error('Не удалось прочитать реестр: '+response.status);
+   const file=response.ok?await response.json():null;
+   const remote=file?await decodeMailboxJson('registry/listings.json',file):{};
+   const next=mergeManifest(remote,rows,deletedIds);
+   if(JSON.stringify(remote.listings||[])===JSON.stringify(next.listings)&&JSON.stringify(remote.deletedListingIds||[])===JSON.stringify(next.deletedListingIds))return remote;
+   const saved=await mailboxRequest('registry/listings.json',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:'Merge listing index safely',content:textBase64(JSON.stringify(next,null,2)),...(file?{sha:file.sha}:{})})});
+   if(saved.ok)return next;
+   if(saved.status!==409&&saved.status!==422)throw Error('Не удалось обновить реестр: '+saved.status);
+  }
+  throw Error('Реестр занят. Отправка будет повторена.');
+ });
+}
+async function putMailboxFileNow(path,content,message,{ifMissing=false}={}){
+ for(let attempt=0;attempt<5;attempt++){
  const current=await mailboxRequest(path),body={message,content};
- if(current.ok){if(ifMissing)return;const existing=await current.json();if(existing.sha)body.sha=existing.sha;}
+ if(current.ok){const existing=await current.json();if(ifMissing)return false;if(existing.content&&existing.encoding==='base64'&&String(existing.content).replace(/\s/g,'')===String(content).replace(/\s/g,''))return false;if(existing.sha)body.sha=existing.sha;}
  else if(current.status!==404)throw Error('Не удалось проверить очередь');
  const response=await mailboxRequest(path,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+ if([409,422].includes(response.status)&&attempt<4)continue;
  if(!response.ok)throw Error('Не удалось передать данные в очередь');
+ return true;
+ }
 }
+const mailboxJson=(path,value,message,options={})=>putMailboxFile(path,textBase64(JSON.stringify(value,null,2)),message,options);
 const compactIds=values=>[...new Set(values||[])].slice(-PROCESSED_FILE_LIMIT);
 const itemTime=item=>Date.parse(item?.updatedAt||item?.processedAt||item?.archivedAt||item?.createdAt||0)||0;
 function mergeById(remote,local){
@@ -119,73 +161,156 @@ function mergeMailboxStates(remote,local){
  const items=mergeById(remote?.items,local?.items).filter(x=>!deleted.includes(x.id)).map(value=>{
   const remoteItem=remoteItems.get(value.id)||{},localItem=localItems.get(value.id)||{};
   const sourceCandidates=[value.sourcePhotos,remoteItem.sourcePhotos,localItem.sourcePhotos].filter(Array.isArray),sourcePhotos=sourceCandidates.find(photos=>photos.some(mediaSrc))||sourceCandidates.find(photos=>photos.length)||[];
-  const groups=[],seen=new Set();for(const group of [...(value.imageHistory||[]),...(localItem.imageHistory||[]),...(remoteItem.imageHistory||[])]){const key=group.id||photoIds(group.photos);if(!key||seen.has(key)||photos.some(saved=>samePhoto(saved,photo)))continue;seen.add(key);groups.push(group);}
+  const groups=[],seen=new Set();for(const group of [...(value.imageHistory||[]),...(localItem.imageHistory||[]),...(remoteItem.imageHistory||[])]){const photos=Array.isArray(group?.photos)?group.photos:[],key=group.id||photoIds(photos);if(!key||seen.has(key)||!photos.length)continue;seen.add(key);groups.push({...group,photos:structuredClone(photos)});}
   return normalItem({...value,sourcePhotos,imageHistory:groups.sort((a,b)=>String(b.createdAt||'').localeCompare(String(a.createdAt||'')))});
  });
  const analytics=itemTime(local?.analytics)>=itemTime(remote?.analytics)?(local?.analytics||remote?.analytics):(remote?.analytics||local?.analytics);
  return {...remote,...local,version:state?.version||local?.version||remote?.version,items,slots:mergeById(remote?.slots,local?.slots),bookings:mergeById(remote?.bookings,local?.bookings),outbox:mergeById(remote?.outbox,local?.outbox),deletedMailboxItemIds:deleted,importedMailboxInbox:compactIds([...(remote?.importedMailboxInbox||[]),...(local?.importedMailboxInbox||[])]),processedMailboxResults:compactIds([...(remote?.processedMailboxResults||[]),...(local?.processedMailboxResults||[])]),analytics:analytics||{updatedAt:null,period:null,source:null},newDraft:local?.newDraft||null,mailboxResetAt:remote?.mailboxResetAt||local?.mailboxResetAt||null};
 }
-const SNAPSHOT_PATH_V2='state/site-state.v2.json';
-async function snapshotPhoto(record,photo){
- if(!photo)return photo;
- const source=photo.src||photo.preview||'',id=String(photo.id||uid()),path=photo.mediaPath||photo.path||('media/'+record.id+'/images/'+id+'.'+fileExtension(photo));
- if(source.startsWith('data:'))await putMailboxFile(path,dataUriBase64(source),'Store listing media',{ifMissing:true});
- return {...photo,mediaPath:path,path,src:null,preview:null};
+const mediaReference=photo=>{const copy={...photo};delete copy.src;delete copy.preview;return copy;};
+const hubOwner=()=>String(mailboxConnection?.repo||'').split('/')[0]||'';
+const monthKey=()=>new Intl.DateTimeFormat('sv-SE',{timeZone:'Europe/Moscow',year:'numeric',month:'2-digit'}).format(new Date());
+const itemRepositoryName=record=>'item-'+String(record.id||'').toLowerCase().replace(/[^a-z0-9-]/g,'').slice(0,48)+'-'+monthKey();
+const repositoryPath=(repo,path='')=>'https://api.github.com/repos/'+String(repo).split('/').map(encodeURIComponent).join('/')+'/contents'+(path?'/'+path.split('/').map(encodeURIComponent).join('/'):'');
+
+async function repositoryRequest(repo,path,options={}){
+ const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),20000);
+ try{return await fetch(repositoryPath(repo,path),{...options,cache:'no-store',headers:{Accept:'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28',Authorization:'Bearer '+mailboxConnection.accessKey,...(options.headers||{})},signal:controller.signal});}
+ finally{clearTimeout(timeout);}
 }
-async function mailboxSnapshot(source){
- const copy=structuredClone(source);
- copy.outbox=[];copy.eventIds=[];copy.importedMailboxInbox=[];copy.processedMailboxResults=[];copy.newDraft=null;
- copy.items=await Promise.all((copy.items||[]).map(async record=>{
-  const photos=await Promise.all((record.photos||[]).map(photo=>snapshotPhoto(record,photo)));
-  const sourcePhotos=await Promise.all((record.sourcePhotos||[]).map(photo=>snapshotPhoto(record,photo)));
-  const imageHistory=await Promise.all((record.imageHistory||[]).map(async group=>({...group,photos:await Promise.all((group.photos||[]).map(photo=>snapshotPhoto(record,photo)))})));
-  return {...record,photos,sourcePhotos,imageHistory};
- }));
- return {schema:'avitolog.state.v2',savedAt:new Date().toISOString(),state:copy};
-}async function syncMailboxState(loadOnly=false){
+function putRepositoryFile(repo,path,content,message,options={}){return queueRepositoryWrite(repo,()=>putRepositoryFileNow(repo,path,content,message,options));}
+async function putRepositoryFileNow(repo,path,content,message,{ifMissing=false}={}){
+ for(let attempt=0;attempt<5;attempt++){
+ const current=await repositoryRequest(repo,path),body={message,content};
+ if(current.ok){const existing=await current.json();if(ifMissing)return false;if(existing.content&&existing.encoding==='base64'&&String(existing.content).replace(/\s/g,'')===String(content).replace(/\s/g,''))return false;if(existing.sha)body.sha=existing.sha;}
+ else if(current.status!==404)throw Error('Не удалось проверить данные объявления');
+ const response=await repositoryRequest(repo,path,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+ if([409,422].includes(response.status)&&attempt<4)continue;
+ if(!response.ok)throw Error('Не удалось сохранить данные объявления');
+ return true;
+ }
+}
+const repositoryJson=(repo,path,value,message,options={})=>putRepositoryFile(repo,path,textBase64(JSON.stringify(value,null,2)),message,options);
+
+async function ensureItemRepository(record){
+ if(record?.itemRepository)return record.itemRepository;
+ if(!record?.id||!hubOwner())throw Error('Не удалось определить объявление');
+ const target=hubOwner()+'/'+itemRepositoryName(record);
+ const payload={name:target.split('/')[1],private:true,auto_init:true,description:'Avitolog listing '+record.id};
+ let response=await fetch('https://api.github.com/user/repos',{method:'POST',headers:{Accept:'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28',Authorization:'Bearer '+mailboxConnection.accessKey,'Content-Type':'application/json'},body:JSON.stringify(payload)});
+ if(!response.ok&&response.status===422)response=await repositoryRequest(target,'');
+ if(!response.ok)throw Error('Не удалось создать репозиторий объявления. Проверьте права секретного ключа.');
+ record.itemRepository=target;record.itemMonth=monthKey();record.itemLoaded=true;
+ await repositoryJson(target,'offers.json',{schemaVersion:1,listingId:record.id,offers:record.offers||[]},'Initialize offers',{ifMissing:true});
+ await repositoryJson(target,'contacts.json',{schemaVersion:1,listingId:record.id,contacts:record.chats||[]},'Initialize contacts',{ifMissing:true});
+ await repositoryJson(target,'tasks/in/.gitkeep',{},'Initialize task inbox',{ifMissing:true});
+ await repositoryJson(target,'tasks/out/.gitkeep',{},'Initialize task outbox',{ifMissing:true});
+ return target;
+}
+async function removeItemRepository(record){
+ if(!record?.itemRepository)return;
+ const response=await fetch('https://api.github.com/repos/'+record.itemRepository,{method:'DELETE',headers:{Accept:'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28',Authorization:'Bearer '+mailboxConnection.accessKey}});
+ if(!response.ok&&response.status!==404)throw Error('Не удалось удалить хранилище объявления. Объявление оставлено без изменений.');
+}
+async function itemSnapshotPhoto(record,photo,bucket,repo){
+ if(!photo)return photo;
+ const source=photo.src||photo.preview||'',id=String(photo.id||uid()),path=photo.mediaPath||photo.path||('images/'+bucket+'/'+id+'.'+fileExtension(photo));
+ if(source.startsWith('data:'))await putRepositoryFile(repo,path,dataUriBase64(source),'Store listing media');
+ return {...mediaReference(photo),mediaPath:path,path,src:null,preview:null};
+}
+async function itemDocument(record,repo){
+ const copy=structuredClone(record);
+ copy.photos=await Promise.all((copy.photos||[]).map(photo=>itemSnapshotPhoto(record,photo,record.generatedCards?'generated':'originals',repo)));
+ copy.sourcePhotos=await Promise.all((copy.sourcePhotos||[]).map(photo=>itemSnapshotPhoto(record,photo,'originals',repo)));
+ copy.imageHistory=await Promise.all((copy.imageHistory||[]).map(async group=>({...group,photos:await Promise.all((group.photos||[]).map(photo=>itemSnapshotPhoto(record,photo,group.kind==='generated'?'generated':'originals',repo)))})));
+ return {schema:'avitolog.item.v1',schemaVersion:1,listingId:record.id,revision:record.revision||0,updatedAt:record.updatedAt||record.createdAt||new Date().toISOString(),item:copy};
+}
+async function syncListingProjection(record){
+ if(!record?.id||record.itemLoaded===false)return null;
+ const repo=await ensureItemRepository(record);
+ await hydrateListingMedia(record,true);
+ const document=await itemDocument(record,repo);
+ await repositoryJson(repo,'listing.json',document,'Update listing');
+ await repositoryJson(repo,'offers.json',{schemaVersion:1,listingId:record.id,revision:record.revision||0,updatedAt:document.updatedAt,offers:record.offers||[]},'Update offers');
+ await repositoryJson(repo,'contacts.json',{schemaVersion:1,listingId:record.id,revision:record.revision||0,updatedAt:document.updatedAt,contacts:record.chats||[]},'Update contacts');
+ return {repo,document};
+}
+function hubListingRow(record,document){
+ const photo=document?.item?.photos?.[0]||{};
+ const activeOffer=(record.offers||[]).find(offer=>offer.status==='pending')||null;
+ return {listingId:record.id,title:record.title,status:record.status,price:record.price,coverPath:photo.path||photo.mediaPath||null,itemRepository:record.itemRepository,revision:record.revision||0,updatedAt:record.updatedAt||record.createdAt||null,stats:record.stats||{},activeOffer:activeOffer?{id:activeOffer.id,price:activeOffer.price,buyer:activeOffer.buyer||'',createdAt:activeOffer.createdAt||null}:null};
+}
+let projectionQueue=Promise.resolve();
+function syncRepositoryProjection(snapshot){
+ const job=projectionQueue.catch(()=>{}).then(()=>syncRepositoryProjectionNow(snapshot));
+ projectionQueue=job;return job;
+}
+async function syncRepositoryProjectionNow(snapshot){
+ const source=snapshot.state,deleted=source.deletedMailboxItemIds||[];
+ const manifest=await readHubJson('registry/listings.json')||{};
+ const tombstones=new Set([...(manifest.deletedListingIds||[]),...deleted]);
+ const remoteRows=new Map((manifest.listings||[]).map(row=>[row.listingId,row]));
+ const rows=[];
+ for(const record of source.items||[]){
+  if(tombstones.has(record.id)||record.itemLoaded===false)continue;
+  const remote=remoteRows.get(record.id);
+  if(remote&&itemTime(remote)>=itemTime(record))continue;
+  const saved=await syncListingProjection(record);
+  if(saved)rows.push(hubListingRow(record,saved.document));
+ }
+ await updateManifest(rows,deleted);
+ const pending=(source.outbox||[]).filter(task=>!task.deliveredAt);
+ if(pending.some(task=>task.type?.startsWith('calendar.')))
+  await mailboxJson('calendar.json',{schemaVersion:1,revision:Date.now(),updatedAt:new Date().toISOString(),slots:source.slots||[],bookings:source.bookings||[]},'Update calendar');
+}
+async function writeTaskProjection(task,attachmentNames=[],repo=null){
+ if(!task?.id)return;
+ const listingId=task.markers?.listingId||task.payload?.itemId||task.payload?.item?.id||null;
+ // В JSON задачи остаются только метаданные и имена вложений: тяжёлые data: URI сохранены отдельными файлами.
+ const input=JSON.parse(mailboxManifest(task,attachmentNames)),document=taskDocument({taskId:task.id,listingId,baseRevision:item(listingId)?.revision||0,action:task.markers?.action||task.type,input,createdAt:task.createdAt});
+ if(repo)await repositoryJson(repo,'tasks/in/'+task.id+'.json',document,'Queue listing task');
+ else await mailboxJson('inbox/'+task.id+'.json',{taskId:task.id,listingId,type:task.type,createdAt:task.createdAt},'Queue hub task');
+}async function readHubJson(path){
+ const response=await mailboxRequest(path);if(response.status===404)return null;if(!response.ok)throw Error('Не удалось прочитать реестр');return decodeMailboxJson(path,await response.json());
+}
+async function loadHubState(){
+ const manifest=await readHubJson('registry/listings.json');
+ if(!manifest||!Array.isArray(manifest.listings))return;
+ const clean=blankState();
+ clean.deletedMailboxItemIds=manifest.deletedListingIds||[];
+ clean.items=manifest.listings.map(row=>normalItem({id:row.listingId,status:row.status||'queue',title:row.title||'Новое объявление',price:row.price??null,photos:row.coverPath?[{id:'cover',path:row.coverPath,mediaPath:row.coverPath}]:[],stats:row.stats||{},offers:row.activeOffer?[row.activeOffer]:[],itemRepository:row.itemRepository||null,revision:row.revision||0,updatedAt:row.updatedAt||null,itemLoaded:false}));
+ const calendar=await readHubJson('calendar.json');if(calendar){clean.slots=calendar.slots||[];clean.bookings=calendar.bookings||[];}
+ const analytics=await readHubJson('analytics.json');if(analytics?.analytics)clean.analytics=analytics.analytics;
+ const job=commitQueue.then(async()=>{state=retainPendingState(clean,state||blankState());await saveState(state);});commitQueue=job.catch(()=>{});await job;
+}
+async function syncMailboxState(loadOnly=false){
  if(mailboxStateSyncing||!state||!mailboxConnection?.repo||!mailboxConnection?.accessKey)return;
  mailboxStateSyncing=true;mailboxStateFailed=false;
- try{
-  let path=SNAPSHOT_PATH_V2,response=await mailboxRequest(path);
-  if(response.status===404){path='state/site-state.json';response=await mailboxRequest(path);}
-  let remote=null,sha=null;
-  if(response.ok){const payload=await response.json();sha=payload.sha;remote=await decodeMailboxJson(path,payload);}
-  else if(response.status!==404)throw Error('Не удалось прочитать состояние');
-  if((remote?.schema==='avitolog.state.v1'||remote?.schema==='avitolog.state.v2')&&remote.state&&loadOnly){
-   state=mergeMailboxStates(remote.state,state);
-   await saveState(state);
-   if(path!==SNAPSHOT_PATH_V2)queueMailboxStateSync(5000);
-   return;
-  }
-  if(loadOnly)return;
-  if((remote?.schema==='avitolog.state.v1'||remote?.schema==='avitolog.state.v2')&&remote.state){state=mergeMailboxStates(remote.state,state);await saveState(state);}
-  const snapshot=await mailboxSnapshot(state),targetPath=SNAPSHOT_PATH_V2,targetResponse=path===targetPath?response:await mailboxRequest(targetPath),body={message:'Update compact Avitolog state',content:textBase64(JSON.stringify(snapshot))};
-  if(targetResponse.ok){const existing=await targetResponse.json();if(existing.sha)body.sha=existing.sha;}
-  else if(targetResponse.status!==404)throw Error('Не удалось подготовить обновление состояния');
-  const saved=await mailboxRequest(targetPath,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-  if(!saved.ok&&saved.status===409)queueMailboxStateSync(1600);
-  else if(!saved.ok)throw Error('Не удалось сохранить состояние');
- }catch{mailboxStateFailed=true;}finally{mailboxStateSyncing=false;}
-}async function sendMailboxEvent(task){
- const prefix=String(task.createdAt||new Date().toISOString()).replace(/\D/g,'').slice(0,14)+'-'+String(task.id).replace(/[^a-zA-Z0-9-]/g,''),photos=task.type==='cards.requested'?task.payload?.sourcePhotos:(['item.created','item.edited'].includes(task.type)?task.payload?.item?.photos:[]),attachmentNames=(photos||[]).map(()=>null);
+ try{if(loadOnly){await loadHubState();return;}await syncRepositoryProjection({state,savedAt:new Date().toISOString()});}
+ catch{mailboxStateFailed=true;queueMailboxStateSync(5000);}
+ finally{mailboxStateSyncing=false;}
+}
+async function sendMailboxEvent(task){
+ const listingId=task.markers?.listingId||task.payload?.itemId||task.payload?.item?.id,record=item(listingId)||task.payload?.item||null,repo=record?await ensureItemRepository(record):null,prefix=String(task.createdAt||new Date().toISOString()).replace(/\D/g,'').slice(0,14)+'-'+String(task.id).replace(/[^a-zA-Z0-9-]/g,''),photos=(task.type==='cards.requested'?task.payload?.sourcePhotos:(['item.created','item.edited'].includes(task.type)?task.payload?.item?.photos:[]))||[],attachmentNames=(photos||[]).map(()=>null);
  for(let index=0;index<photos.length;index++){
-  const photo=photos[index],encoded=dataUriBase64(photo.src||photo.preview),extension=fileExtension(photo);
-  if(!encoded)continue;
+  const photo=photos[index],encoded=dataUriBase64(photo.src||photo.preview),extension=fileExtension(photo);if(!encoded)continue;
   const name=prefix+'-'+(index+1)+'-photo.'+extension;
-  await putMailboxFile('inbox/'+name,encoded,'Add attachment '+name);attachmentNames[index]=name;
+  if(repo)await putRepositoryFile(repo,'tasks/in/'+name,encoded,'Add task attachment '+name);else await putMailboxFile('inbox/'+name,encoded,'Add attachment '+name);
+  attachmentNames[index]=name;
  }
- const name=prefix+'-text.txt',manifest=mailboxManifest(task,attachmentNames);
- await putMailboxFile('inbox/'+name,textBase64(manifest),'Add announcement '+name);
+ if(record){
+  const saved=await syncListingProjection(record);
+  if(saved)await updateManifest([hubListingRow(record,saved.document)],state.deletedMailboxItemIds||[]);
+ }
+ if(repo)await writeTaskProjection(task,attachmentNames,repo);
+ await mailboxJson('inbox/'+prefix+'-command.json',{schema:'avitolog.hub-command.v1',taskId:task.id,listingId:listingId||null,type:task.type,createdAt:task.createdAt,itemRepository:repo,taskPath:repo?'tasks/in/'+task.id+'.json':null},'Add hub command');
+ await syncRepositoryProjection({state,savedAt:new Date().toISOString()});
 }
 async function syncMailbox(){
  if(mailboxSyncing||!state||!mailboxConnection?.repo||!mailboxConnection?.accessKey)return;
  mailboxSyncing=true;
- try{
-  for(const task of state.outbox.filter(x=>!x.deliveredAt)){
-   try{await sendMailboxEvent(task);}catch{queueMailboxSync(10000);return;}
-   await commit(s=>{const saved=s.outbox.find(x=>x.id===task.id);if(saved)saved.deliveredAt=new Date().toISOString();return s;});
-  }
- }finally{mailboxSyncing=false;if(state?.outbox.some(x=>!x.deliveredAt))queueMailboxSync(10000);}
+ try{for(const task of state.outbox.filter(x=>!x.deliveredAt)){try{await sendMailboxEvent(task);}catch(error){mailboxStateFailed=true;toast('Объявление сохранено на устройстве. Отправка повторится: '+error.message);queueMailboxSync(10000);return;}await commit(s=>{const saved=s.outbox.find(x=>x.id===task.id);if(saved)saved.deliveredAt=new Date().toISOString();return s;});}}
+ finally{mailboxSyncing=false;if(state?.outbox.some(x=>!x.deliveredAt))queueMailboxSync(10000);}
 }
 const base64Text=value=>{const binary=atob(String(value||'').replace(/\s/g,'')),bytes=Uint8Array.from(binary,c=>c.charCodeAt(0));return new TextDecoder().decode(bytes);};
 async function decodeMailboxJson(path,payload){
@@ -196,26 +321,33 @@ async function decodeMailboxJson(path,payload){
 }
 async function readMailboxJson(folder,file){const path=folder+'/'+file.name,response=await mailboxRequest(path);if(!response.ok)throw Error('Не удалось прочитать файл очереди');return decodeMailboxJson(path,await response.json());}
 const mediaType=photo=>photo.type||({jpg:'image/jpeg',jpeg:'image/jpeg',png:'image/png',gif:'image/gif',webp:'image/webp'}[(String(photo.path||photo.file||'').split('.').pop()||'').toLowerCase()]||'image/jpeg');
-async function restoreMailboxPhotos(folder,photos){
+async function restoreMailboxPhotos(folder,photos,repository=mailboxConnection?.repo){
  const restored=[];
  for(const photo of photos||[]){
   if(photo.src){restored.push(photo);continue;}
   const path=photo.path||[folder,photo.file].filter(Boolean).join('/');
   if(!path){restored.push(photo);continue;}
   if(path.startsWith('/')||path.includes('..')||!path.split('/').every(part=>/^[a-zA-Z0-9А-Яа-яЁё_. -]+$/.test(part)))throw Error('Некорректный путь фотографии');
-  const response=await mailboxRequest(path,{headers:{Accept:'application/vnd.github.raw+json'}});
+  const response=repository===mailboxConnection?.repo
+   ?await mailboxRequest(path,{headers:{Accept:'application/vnd.github.raw+json'}})
+   :await repositoryRequest(repository,path,{headers:{Accept:'application/vnd.github.raw+json'}});
   if(!response.ok)throw Error('Не удалось загрузить фотографию. Повторим синхронизацию.');
   const bytes=await response.arrayBuffer();
   if(!bytes.byteLength)throw Error('Получена пустая фотография');
   restored.push({...photo,src:await fileData(new Blob([bytes],{type:mediaType(photo)}))});
  }
  return restored;
+}async function decodeRepositoryJson(repo,path,payload){
+ if(payload.content&&payload.encoding!=='none')return JSON.parse(base64Text(payload.content));
+ const raw=await repositoryRequest(repo,path,{headers:{Accept:'application/vnd.github.raw+json'}});
+ if(!raw.ok)throw Error('Не удалось прочитать данные объявления');
+ return JSON.parse(await raw.text());
 }
-async function restoreSnapshotPhoto(photo){
+async function restoreSnapshotPhoto(photo,repo=mailboxConnection?.repo){
  const path=photo?.mediaPath||photo?.path;
- if(!path||mediaSrc(photo))return photo;
+ if(!path||mediaSrc(photo)||!repo)return photo;
  if(path.startsWith('/')||path.includes('..')||!path.split('/').every(part=>/^[a-zA-Z0-9А-Яа-яЁё_. -]+$/.test(part)))return photo;
- const response=await mailboxRequest(path,{headers:{Accept:'application/vnd.github.raw+json'}});
+ const response=await repositoryRequest(repo,path,{headers:{Accept:'application/vnd.github.raw+json'}});
  if(!response.ok)return photo;
  const bytes=await response.arrayBuffer();if(!bytes.byteLength)return photo;
  return {...photo,src:await fileData(new Blob([bytes],{type:mediaType(photo)})),preview:null};
@@ -243,6 +375,13 @@ function applyMailboxEvent(s,event,photos=[]){
   archiveCurrentPhotos(record);record.cardRequestStatus='completed';record.updatedAt=event.createdAt;return;
  }
  if(event?.type==='cards.requested')return;
+  if(event?.type==='processing.completed'&&p.itemId&&p.item){
+  mergeRemoteItem(s,p.item,photos);
+  const x=s.items.find(value=>value.id===p.itemId);
+  if(x)x.processingResult={taskId:p.taskId||null,status:'completed',summary:p.cli?.summary||'',checkedAt:event.createdAt||new Date().toISOString()};
+  return;
+ }
+ if(event?.type==='processing.reviewed'&&p.itemId){const x=s.items.find(value=>value.id===p.itemId);if(x){x.processingResult={taskId:p.taskId||null,status:p.cli?.status||null,summary:p.cli?.summary||'',checkedAt:event.createdAt||new Date().toISOString()};}return;}
 
  if(event?.type==='listing.ready'){
   const source=event.item||remote||{id:event.itemId,status:'queue',photos:event.photos||[]};
@@ -256,7 +395,7 @@ function applyMailboxEvent(s,event,photos=[]){
  if(event?.type==='item.publish'&&p.itemId){const x=s.items.find(v=>v.id===p.itemId);if(x){x.status='published';delete x.archivedAt;}return;}
  if(event?.type==='item.comment'&&p.itemId&&p.comment){const x=s.items.find(v=>v.id===p.itemId);if(x){x.comments??=[];const i=x.comments.findIndex(v=>v.id===p.comment.id);if(i<0)x.comments.push(p.comment);else x.comments[i]=p.comment;}return;}
  if(event?.type==='cards.comment'&&p.itemId&&p.comment){const x=s.items.find(v=>v.id===p.itemId);if(x){x.cardComments??=[];const i=x.cardComments.findIndex(v=>v.id===p.comment.id);if(i<0)x.cardComments.push(p.comment);else x.cardComments[i]=p.comment;}return;}
- if(event?.type==='offer.upsert'||event?.type==='chat.upsert'){try{receiveEvent(s,event);}catch{}return;}
+ if(event?.type==='offer.upsert'||event?.type==='chat.upsert'){try{Object.assign(s,receiveEvent(s,event));}catch{}return;}
  if(event?.type==='calendar.slot.opened'&&p.slot?.id){if(!s.slots.some(x=>x.id===p.slot.id))s.slots.push(p.slot);return;}
  if(event?.type==='calendar.slot.removed'&&p.slotId){s.slots=s.slots.filter(x=>x.id!==p.slotId);s.bookings=s.bookings.filter(x=>x.slotId!==p.slotId);return;}
  if(event?.type==='calendar.booking.created'&&p.booking?.id){if(!s.bookings.some(x=>x.id===p.booking.id))s.bookings.push(p.booking);return;}
@@ -268,12 +407,13 @@ async function importMailboxFolder(folder,processedKey){
  const files=(await listResponse.json()).filter(file=>file.type==='file'&&file.name!=='.gitkeep'&&(/-text\.txt$/i.test(file.name)||/\.(json|txt)$/i.test(file.name))).sort((a,b)=>String(a.name).localeCompare(String(b.name)));
  for(const file of files){
   if(state[processedKey]?.includes(file.sha))continue;
-  let event;try{event=await readMailboxJson(folder,file);}catch{continue;}
+  let event;try{event=await readMailboxJson(folder,file);if(event?.itemRepository&&event?.resultPath){const resultResponse=await repositoryRequest(event.itemRepository,event.resultPath);if(!resultResponse.ok)continue;event=await decodeRepositoryJson(event.itemRepository,event.resultPath,await resultResponse.json());}}catch{continue;}
   const remote=event?.payload?.item||(event?.type==='item.upsert'?event.payload:null)||(event?.type==='listing.ready'?(event.item||{photos:event.photos||[]}):null);
   const incomingPhotos=event?.type==='cards.completed'?event.payload?.photos:remote?.photos;
-  const photos=incomingPhotos?await restoreMailboxPhotos(folder,incomingPhotos):[];
+  const photos=incomingPhotos?await restoreMailboxPhotos(folder,incomingPhotos,event?.itemRepository||mailboxConnection.repo):[];
   await commit(s=>{if(s[processedKey]?.includes(file.sha))return s;applyMailboxEvent(s,event,photos);markMailboxFile(s,folder,file.sha);return s;});
-  if(event?.type==='listing.ready'){toast('Объявление подготовлено к публикации');render();}
+  if(folder==='outbox'&&event?.id)await mailboxJson('tasks/results/'+event.id+'.json',{schemaVersion:REPOSITORY_SCHEMA,eventId:event.id,type:event.type,listingId:event.payload?.itemId||event.itemId||event.item?.id||null,createdAt:event.createdAt||null,status:'applied'},'Index applied result');
+  if(event?.type==='listing.ready'||event?.type==='processing.completed'){toast('Объявление подготовлено к публикации');render();}
   if(event?.type==='cards.completed'&&state.items.find(x=>x.id===event.payload?.itemId)?.generatedCards?.requestKey===event.payload?.requestKey){toast('Карточки синхронизированы');render();}
  }
  return true;
@@ -435,11 +575,30 @@ function bookingPage(x,offerId,params){
 }
 function missing(){return page('Страница не найдена','/list/queue',section('<p>Объявление или интервал уже недоступны.</p>'));}
 let mediaHydrationRevision=0;
+const itemHydrationPending=new Map();
+async function hydrateItemRepository(record){
+ if(!record?.itemRepository||record.itemLoaded)return record;
+ if(itemHydrationPending.has(record.id))return itemHydrationPending.get(record.id);
+ const pending=(async()=>{
+  const response=await repositoryRequest(record.itemRepository,'listing.json');
+  if(!response.ok)throw Error('Не удалось загрузить объявление');
+  const document=await decodeRepositoryJson(record.itemRepository,'listing.json',await response.json());
+  const offersResponse=await repositoryRequest(record.itemRepository,'offers.json');
+  const contactsResponse=await repositoryRequest(record.itemRepository,'contacts.json');
+  const offers=offersResponse.ok?(await decodeRepositoryJson(record.itemRepository,'offers.json',await offersResponse.json())).offers||[]:[];
+  const contacts=contactsResponse.ok?(await decodeRepositoryJson(record.itemRepository,'contacts.json',await contactsResponse.json())).contacts||[]:[];
+  const merged=normalItem({...record,...(document.item||{}),offers,chats:contacts,itemRepository:record.itemRepository,itemLoaded:true});
+  const index=state.items.findIndex(value=>value.id===record.id);if(index>=0){state.items[index]=merged;await saveState(state);}
+  return merged;
+ })().finally(()=>itemHydrationPending.delete(record.id));
+ itemHydrationPending.set(record.id,pending);return pending;
+}
+
 async function hydrateListingMedia(record,full){
  let changed=false;
  const hydrate=async photos=>{
   if(!(photos||[]).some(photo=>!mediaSrc(photo)))return photos;
-  const listingId=record.id||record.key||'new',loaded=await readPhotoMedia(listingId,photos,{full}),resolved=await Promise.all(loaded.map(photo=>restoreSnapshotPhoto(photo)));
+  const listingId=record.id||record.key||'new',loaded=await readPhotoMedia(listingId,photos,{full}),resolved=await Promise.all(loaded.map(photo=>restoreSnapshotPhoto(photo,record.itemRepository||mailboxConnection?.repo)));
   for(const photo of resolved)if(mediaSrc(photo))void cachePhotoMedia(listingId,photo);
   if(resolved.some((photo,index)=>mediaSrc(photo)!==mediaSrc(photos[index])))changed=true;
   return resolved;
@@ -477,6 +636,7 @@ function render(){
  else if(parts[0]==='slot')root.innerHTML=parts[1]==='new'?slotEditor(params):schedulePage(parts[1]);
  else if(parts[0]==='item'){
  const x=item(parts[1]);
+ if(x?.itemRepository&&!x.itemLoaded){root.innerHTML='<div class="loading">Загружаем объявление…</div>';void hydrateItemRepository(x).then(()=>render()).catch(error=>{root.innerHTML=page('Не удалось загрузить объявление','/list/ready',section('<p>'+esc(error.message)+'</p>'));});return;}
  root.innerHTML=!x?missing():parts[2]==='edit'?editPage(x.id):parts[2]==='comments'?commentsPage(x):parts[2]==='cards-comment'?cardCommentsPage(x):parts[2]==='offers'?offersPage(x):parts[2]==='writers'?writersPage(x):parts[2]==='chat'?chatPage(x,parts[3]):parts[2]==='book'?bookingPage(x,parts[3],params):detailPage(x);
  }else root.innerHTML=listPage(parts[1]||'queue');
  }catch(e){root.innerHTML=page('Не удалось открыть страницу','/list/queue',section('<p>'+esc(e.message)+'</p>'));}
@@ -517,9 +677,12 @@ async function connectMailbox(form){
  try{response=await mailboxRequest('inbox');}catch{mailboxConnection=previous;throw Error('Не удалось подключиться к очереди');}
  if(!response.ok){mailboxConnection=previous;throw Error(response.status===401||response.status===403?'Секретный ключ не подходит':'Очередь недоступна. Проверьте репозиторий');}
  localStorage.setItem(CONNECTION_KEY,JSON.stringify(candidate));
- unlocked=true;state=await readState();render();queueMailboxSync();queueMailboxResultSync();void syncMailboxState(true).then(()=>render());
-}
-function inlineError(message){const el=document.getElementById('form-error');if(el)el.innerHTML='<p class="inline-error">'+esc(message)+'</p>';else toast(message);}
+ unlocked=true;
+ state=previous?.repo===repo?await readState():blankState();
+ await saveState(state);
+ await syncMailboxState(true);
+ render();queueMailboxSync();queueMailboxResultSync();
+}function inlineError(message){const el=document.getElementById('form-error');if(el)el.innerHTML='<p class="inline-error">'+esc(message)+'</p>';else toast(message);}
 function prepareCardRequest(saved,existing){
  const signature=cardRequestKey(saved),previous=existing?.cardRequestKey??null;
  if(signature!==previous){saved.cardRequestKey=signature;saved.cardRequestStatus=signature?'requested':null;saved.generatedCards=null;}
@@ -606,7 +769,9 @@ root.addEventListener('click',async e=>{
  }else if(action==='delete-item'){
   const id=route().parts[1],x=item(id);if(!x)return;if(x.status==='published'){toast('Сначала архивируйте объявление');return;}
   if(!window.confirm('Are you sure? Точно хотите удалить это объявление?'))return;
-   await commit(s=>{s.items=s.items.filter(value=>value.id!==id);s.deletedMailboxItemIds??=[];if(!s.deletedMailboxItemIds.includes(id))s.deletedMailboxItemIds.push(id);addOutbox(s,'item.deleted',{itemId:id},{action:'listing.delete',listingId:id});return s;});
+   await updateManifest([], [id]);
+   await removeItemRepository(x);
+    await commit(s=>{s.items=s.items.filter(value=>value.id!==id);s.deletedMailboxItemIds??=[];if(!s.deletedMailboxItemIds.includes(id))s.deletedMailboxItemIds.push(id);return s;});
   go('/list/ready');toast('Объявление удалено');
  }else if(action==='day-select'){
  const date=b.dataset.date;
@@ -682,7 +847,14 @@ root.addEventListener('paste',async e=>{
 root.addEventListener('input',e=>{if(e.target.hasAttribute('data-time-input')){const digits=e.target.value.replace(/\D/g,'').slice(0,4);e.target.value=digits.slice(0,2)+(digits.length>2?':'+digits.slice(2):'');}if(e.target.name==='cardCount'){if(draft)draft.cardCount=Math.max(1,Math.min(10,Number(e.target.value)||1));refreshCardCountNote();}if(draft?.key==='new'&&e.target.closest('#item-form'))syncNewDraft();});
 window.addEventListener('hashchange',()=>{window.scrollTo(0,0);render();});
 async function boot(){
- try{mailboxConnection=JSON.parse(localStorage.getItem(CONNECTION_KEY)||'null');unlocked=!!(mailboxConnection?.repo&&mailboxConnection?.accessKey);if(unlocked){state=await readState();queueMailboxSync();queueMailboxResultSync();void syncMailboxState(true).then(()=>render());}render();}
- catch(e){root.innerHTML='<main class="login"><div class="login-card"><h1>Не удалось открыть хранилище</h1><p>'+esc(e.message)+'</p><p>Разрешите хранение данных для сайта и обновите страницу.</p></div></main>';}
+ try{
+  mailboxConnection=JSON.parse(localStorage.getItem(CONNECTION_KEY)||'null');
+  unlocked=!!(mailboxConnection?.repo&&mailboxConnection?.accessKey);
+  if(unlocked){
+   state=await readState();
+   void syncMailboxState(true).then(()=>{render();queueMailboxSync();queueMailboxResultSync();});
+  }
+  render();
+ }catch(e){root.innerHTML='<main class="login"><div class="login-card"><h1>Не удалось открыть хранилище</h1><p>'+esc(e.message)+'</p><p>Разрешите хранение данных для сайта и обновите страницу.</p></div></main>';}
 }
 boot();

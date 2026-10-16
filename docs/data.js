@@ -1,4 +1,4 @@
-import {sampleState,VERSION} from './model.js?v=12';
+import {sampleState,VERSION} from './model.js?v=14';
 const DB='avitolog-workspace-v3';
 const STORE='workspace',MEDIA='media';
 let dbPromise;
