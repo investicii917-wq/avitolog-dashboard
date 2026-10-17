@@ -46,11 +46,12 @@ function harness(){
     return response(409,{});
    }
    if((current?.sha)!==body.sha)return response(409,{});
+   if(method==='DELETE'){files.delete(route);return response(200,{});}
    files.set(route,{sha:String(++version),content:body.content,encoding:'base64'});return response(200,{});
   }finally{active.delete(repository);}
  };
  let source=fs.readFileSync(new URL('../docs/app.js',import.meta.url),'utf8').replace(/^import .*;\r?\n/gm,'').replace(/\nboot\(\);\s*$/,'');
- source+='\n globalThis.api={sendMailboxEvent,syncRepositoryProjection,loadHubState,updateManifest,updateCalendarProjection,setup:s=>{state=s;mailboxConnection={repo:"owner/hub",accessKey:"test"}},state:()=>state};';
+ source+='\n globalThis.api={syncListingProjection,sendMailboxEvent,syncRepositoryProjection,loadHubState,updateManifest,updateCalendarProjection,setup:s=>{state=s;mailboxConnection={repo:"owner/hub",accessKey:"test"}},state:()=>state};';
  vm.runInContext(source,context);
  return {api:context.api,files,requests};
 }
@@ -59,7 +60,7 @@ test('actual dispatch stores media and listing before command, merges conflict, 
  const task={id:'task',type:'item.created',createdAt:'2026-10-15T12:00:00Z',payload:{itemId:record.id,item:record},markers:{listingId:record.id}};
  const state={...model.blankState(),items:[record],outbox:[task]};
  h.api.setup(state);await h.api.sendMailboxEvent(task);
- const listingPaths=[...h.files.keys()].filter(x=>x.endsWith('/listing.json'));assert.equal(listingPaths.length,1);
+ const listingPaths=[...h.files.keys()].filter(x=>x.endsWith('/contents/listing.json'));assert.equal(listingPaths.length,1);
  const persisted=JSON.parse(Buffer.from(h.files.get(listingPaths[0]).content,'base64'));
  assert.equal(persisted.item.photos.length,3);
  for(const photo of persisted.item.photos)assert.ok(h.files.has(listingPaths[0].replace(/listing.json$/,photo.path)));
@@ -82,4 +83,16 @@ test('pending local calendar operation merges with a fresh remote calendar',()=>
  const merged=hub.retainPendingState(remote,local);
  assert.deepEqual(merged.slots.map(value=>value.id).sort(),['local-slot','remote-slot']);
  assert.ok(merged.calendarAppliedOperationIds.includes('operation'));
+});
+
+test('published and archived folders are exclusive and preserve canonical photos',async()=>{
+ const h=harness(),item=model.normalItem({id:'status-test',status:'ready',photos:[]});
+ h.api.setup({...model.blankState(),items:[item]});
+ for(const status of ['ready','published','archived','ready']){
+  item.status=status;item.updatedAt=new Date().toISOString();await h.api.syncListingProjection(item);
+  const markers=[...h.files.keys()].filter(path=>path.includes('/states/'));
+  assert.equal(markers.length,1);assert.ok(markers[0].includes('/states/'+status+'/'));
+  const canonical=[...h.files.entries()].find(([path])=>path.endsWith('/contents/listing.json'));
+  assert.equal(JSON.parse(Buffer.from(canonical[1].content,'base64')).item.status,status);
+ }
 });

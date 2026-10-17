@@ -11,11 +11,11 @@ export function cardSpec(record) {
  const format=normalizeCardFormat(record.cardFormat),requested=!!record.generateCards;
  const style=requested?normalizeCardStyle(record.cardStyle):null;
  const aspectRatio=format==='landscape'?'4:3':format==='portrait'?'3:4':null;
- return {contractVersion:3,requested,style,styleLabel:style?CARD_STYLES[style].label:null,
+ return {contractVersion:4,requested,style,styleLabel:style?CARD_STYLES[style].label:null,
   count:requested?normalizeCardCount(record.cardCount):0,format,
   formatLabel:format==='landscape'?'горизонтальный 4:3':format==='portrait'?'вертикальный 3:4':'подобрать по товару',
-  aspectRatio,aspectRatioPolicy:aspectRatio?'fixed':'choose-once-for-whole-series',
-  uniformAspectRatio:true,baseStyle:style==='designer'?'studio':null,
+  aspectRatio,aspectRatioPolicy:aspectRatio?'fixed':'square-cover-then-uniform-series',
+  coverAspectRatio:'1:1',uniformAspectRatio:false,baseStyle:style==='designer'?'studio':null,
   factsSource:'listing.description-only',preserveProduct:true,
   guide:'instructions/cards/README.md'};
 }
@@ -37,8 +37,9 @@ export function cardResultProblem(record, result) {
  if(!Array.isArray(result.photos)||result.photos.length!==normalizeCardCount(record.cardCount))return 'Получены не все карточки';
  const [w,h]=result.aspectRatio.split(':').map(Number);
  if(new Set(result.photos.map(p=>p.id)).size!==result.photos.length)return 'Повторяются номера карточек';
- for(const photo of result.photos){
-  if(!photo.id||(!photo.file&&!photo.src)||!Number.isInteger(photo.width)||!Number.isInteger(photo.height)||photo.width<1||photo.height<1||photo.width*h!==photo.height*w)return 'Размеры карточек не соответствуют единому формату';
+ for(const [index,photo] of result.photos.entries()){
+  const [pw,ph]=index===0?[1,1]:[w,h];
+  if(!photo.id||(!photo.file&&!photo.src)||!Number.isInteger(photo.width)||!Number.isInteger(photo.height)||photo.width<1||photo.height<1||photo.width*ph!==photo.height*pw)return 'Первая карточка должна быть квадратной, остальные — в формате серии';
  }
  return null;
 }

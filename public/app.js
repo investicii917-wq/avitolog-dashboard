@@ -1,6 +1,6 @@
 import {mergeManifest,retainPendingState} from './hub-sync.js?v=1';
 import {installPhotoSort} from './photo-sort.js?v=2';
-import {CARD_STYLES,normalizeCardStyle,normalizeCardFormat,cardSpec,cardRequestKey,cardResultProblem} from './cards.js?v=3';
+import {CARD_STYLES,normalizeCardStyle,normalizeCardFormat,cardSpec,cardRequestKey,cardResultProblem} from './cards.js?v=4';
 
 import {readState,saveState,readPhotoMedia,cachePhotoMedia} from './data.js?v=11';
 import {uid,todayKey,normalItem,receiveEvent,addSlot,addBooking,freeTimes,dayLoad,minutes,blankState} from './model.js?v=16';
@@ -87,11 +87,11 @@ async function mailboxRequest(path,options={}){
 function fileExtension(photo){const type=String(photo.type||'').toLowerCase();if(type.includes('png'))return 'png';if(type.includes('webp'))return 'webp';if(type.includes('gif'))return 'gif';return 'jpg';}
 function cardJob(task,payload,photos){
  const cards=cardSpec({generateCards:true,cardStyle:payload.style,cardFormat:payload.format,cardCount:payload.count});
- return {contractVersion:3,taskId:task.id,listingId:payload.itemId||task.markers?.listingId||null,intent:'cards.generate',
+ return {contractVersion:4,taskId:task.id,listingId:payload.itemId||task.markers?.listingId||null,intent:'cards.generate',
   style:{code:cards.style,label:cards.styleLabel,baseStyle:cards.baseStyle||cards.style},
-  series:{requestedCount:cards.count,formatCode:cards.format,formatLabel:cards.formatLabel,aspectRatio:cards.aspectRatio,aspectRatioPolicy:cards.aspectRatioPolicy,uniformAspectRatio:true},
+  series:{requestedCount:cards.count,formatCode:cards.format,formatLabel:cards.formatLabel,aspectRatio:cards.aspectRatio,aspectRatioPolicy:cards.aspectRatioPolicy,coverAspectRatio:'1:1',uniformAspectRatio:false},
   source:{photoIds:photos.map(photo=>photo.id),attachments:photos.map(photo=>({photoId:photo.id,file:photo.file||null,type:photo.type})),factsSource:'listing.description-only'},
-  resultRequirements:{styleCode:cards.style,exactCount:cards.count,oneAspectRatioForWholeSeries:true,echoRequestKey:payload.requestKey,returnPhotoIds:true}};
+  resultRequirements:{styleCode:cards.style,exactCount:cards.count,coverAspectRatio:'1:1',oneAspectRatioForRemainingCards:true,echoRequestKey:payload.requestKey,returnPhotoIds:true}};
 }
 function mailboxManifest(task,attachmentNames){
  const payload=structuredClone(task.payload||{}),photos=task.type==='cards.requested'?payload?.sourcePhotos:payload?.item?.photos;
@@ -227,12 +227,26 @@ async function itemDocument(record,repo){
  copy.imageHistory=await Promise.all((copy.imageHistory||[]).map(async group=>({...group,photos:await Promise.all((group.photos||[]).map(photo=>itemSnapshotPhoto(record,photo,group.kind==='generated'?'generated':'originals',repo)))})));
  return {schema:'avitolog.item.v1',schemaVersion:1,listingId:record.id,revision:record.revision||0,updatedAt:record.updatedAt||record.createdAt||new Date().toISOString(),item:copy};
 }
+async function syncStatusFolder(repo,document){
+ const statuses=['queue','ready','published','archived','sold'],status=document.item.status;
+ if(!statuses.includes(status))throw Error('Неизвестный статус объявления');
+ await repositoryJson(repo,'states/'+status+'/listing.json',{schemaVersion:1,listingId:document.listingId,status,revision:document.revision,documentPath:'listing.json'},'Update status pointer');
+ for(const other of statuses.filter(value=>value!==status)){
+  const path='states/'+other+'/listing.json',response=await repositoryRequest(repo,path);
+  if(response.status===404)continue;
+  if(!response.ok)throw Error('Не удалось проверить предыдущий статус');
+  const file=await response.json();
+  const removed=await repositoryRequest(repo,path,{method:'DELETE',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:'Remove previous status pointer',sha:file.sha})});
+  if(!removed.ok&&removed.status!==404)throw Error('Перенос статуса будет повторён');
+ }
+}
 async function syncListingProjection(record){
  if(!record?.id||record.itemLoaded===false)return null;
  const repo=await ensureItemRepository(record);
  await hydrateListingMedia(record,true);
  const document=await itemDocument(record,repo);
  await repositoryJson(repo,'listing.json',document,'Update listing');
+ await syncStatusFolder(repo,document);
  await repositoryJson(repo,'offers.json',{schemaVersion:1,listingId:record.id,revision:record.revision||0,updatedAt:document.updatedAt,offers:record.offers||[]},'Update offers');
  await repositoryJson(repo,'contacts.json',{schemaVersion:1,listingId:record.id,revision:record.revision||0,updatedAt:document.updatedAt,contacts:record.chats||[]},'Update contacts');
  return {repo,document};
@@ -663,13 +677,13 @@ function render(){
   let swipe=null;
   const count=Number(track.dataset.count)||1,counter=document.getElementById('gallery-counter');
   const page=()=>Math.round(track.scrollLeft/(track.clientWidth||1));
-  const setIndex=index=>{galleryIndex=((index%count)+count)%count;if(counter)counter.textContent=(galleryIndex+1)+' / '+count;document.querySelectorAll('.gallery-thumbs [data-index]').forEach(button=>button.classList.toggle('active',Number(button.dataset.index)===galleryIndex));};
+  const setIndex=index=>{galleryIndex=((index%count)+count)%count;const active=track.children[page()]?.querySelector('img');if(active?.naturalWidth&&active?.naturalHeight)track.style.height=(track.clientWidth*active.naturalHeight/active.naturalWidth)+'px';if(counter)counter.textContent=(galleryIndex+1)+' / '+count;document.querySelectorAll('.gallery-thumbs [data-index]').forEach(button=>button.classList.toggle('active',Number(button.dataset.index)===galleryIndex));};
   const jump=target=>{const behavior=track.style.scrollBehavior;track.style.scrollBehavior='auto';track.scrollLeft=target*(track.clientWidth||1);requestAnimationFrame(()=>{track.style.scrollBehavior=behavior;});setIndex(target);};
   const showPage=target=>{track.scrollTo({left:target*(track.clientWidth||1),behavior:'smooth'});setIndex(target);};
   const update=()=>setIndex(page());
   track._galleryStep=step=>{const current=page(),target=current+step;if(target<0)jump(count*3-1);else if(target>=count*5)jump(count*2);else showPage(target);};
   track._galleryPick=index=>jump(count*2+Number(index));
-  track.addEventListener('scroll',update,{passive:true});
+  track.addEventListener('scroll',update,{passive:true});track.addEventListener('load',update,true);window.addEventListener('resize',update,{once:true});
   track.addEventListener('pointerdown',event=>{if(event.pointerType==='mouse'||count<2)return;swipe={id:event.pointerId,x:event.clientX,y:event.clientY,page:page()};track.setPointerCapture?.(event.pointerId);});
   track.addEventListener('pointerup',event=>{if(!swipe||swipe.id!==event.pointerId)return;const dx=event.clientX-swipe.x,dy=event.clientY-swipe.y,startPage=swipe.page;swipe=null;if(Math.abs(dx)>=36&&Math.abs(dx)>Math.abs(dy)){if(startPage===count*5-1&&dx<0)jump(count*2);else if(startPage===0&&dx>0)jump(count*3-1);}});
   track.addEventListener('pointercancel',()=>{swipe=null;});

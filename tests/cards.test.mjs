@@ -23,7 +23,7 @@ base.cardRequestKey=cards.cardRequestKey(base);
 check(cards.cardRequestKey(structuredClone(base))===base.cardRequestKey);
 for(const change of [{cardFormat:'portrait'},{cardStyle:'studio'},{cardCount:2},{raw:'Другой факт'},{description:'Новое описание'},{sourcePhotos:[{id:'other'}]}])check(cards.cardRequestKey({...base,...change})!==base.cardRequestKey);
 check(cards.cardRequestKey({...base,defects:'Другая закрытая заметка'})===base.cardRequestKey);
-const photos=[1,2,3].map(n=>({id:'p'+n,file:'20261013-p'+n+'.png',width:1600,height:1200}));
+const photos=[1,2,3].map(n=>({id:'p'+n,file:'20261013-p'+n+'.png',width:n===1?1200:1600,height:1200}));
 const result={itemId:base.id,requestKey:base.cardRequestKey,style:'designer',aspectRatio:'4:3',photos};
 check(cards.cardResultProblem(base,result)===null);
 for(const change of [{requestKey:'old'},{style:'studio'},{aspectRatio:'3:4'},{photos:photos.slice(1)},{photos:photos.map(p=>({...p,width:1599}))},{photos:photos.map(p=>({...p,id:'same'}))}])check(!!cards.cardResultProblem(base,{...result,...change}));
