@@ -101,7 +101,7 @@ function mailboxManifest(task,attachmentNames){
   payload.cardJob=cardJob(task,payload,manifestPhotos);
  }
  else if(Array.isArray(photos))payload.item.photos=manifestPhotos;
- if(payload.item)delete payload.item.sourcePhotos;
+  if(payload.item){delete payload.item.sourcePhotos;delete payload.item.imageHistory;}
  return JSON.stringify({schema:'avitolog.mailbox.v1',id:task.id,type:task.type,createdAt:task.createdAt,payload,markers:task.markers||{},attachments:attachmentNames},null,2);
 }
 function putMailboxFile(path,content,message,options={}){return queueRepositoryWrite(mailboxConnection.repo,()=>putMailboxFileNow(path,content,message,options));}
