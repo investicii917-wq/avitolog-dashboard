@@ -520,8 +520,9 @@ function visualReviewPanel(x){
  const note=x.generatedCards?.quality==='design-preview'?'<p class="help">Проверка оформления: изображения демонстрационные. Надписи на товаре требуют исправления перед публикацией.</p>':'';
  return section(note+link(icon('comment')+'Добавить комментарий по фото'+icon('next'),'/item/'+x.id+'/cards-comment','btn outline block action-link'),'visual-review');
 }
+function pickupLabel(minutes){return Number(minutes)>=480?'Весь день':Number(minutes)+' мин на получение';}
 function detailPage(x){
- const main=gallery(x)+section('<span class="tag">'+statusName[x.status]+'</span><h1 class="detail-title">'+esc(x.title)+'</h1><div class="detail-price">'+money(x.price)+'</div><div class="facts"><div><span>Самовывоз</span><b>'+x.pickupMinutes+' мин на получение</b></div><div><span>Доставка</span><b>'+(x.delivery?'Можно обсудить':'Не предусмотрена')+'</b></div></div>');
+ const main=gallery(x)+section('<span class="tag">'+statusName[x.status]+'</span><h1 class="detail-title">'+esc(x.title)+'</h1><div class="detail-price">'+money(x.price)+'</div><div class="facts"><div><span>Самовывоз</span><b>'+pickupLabel(x.pickupMinutes)+'</b></div><div><span>Доставка</span><b>'+(x.delivery?'Можно обсудить':'Не предусмотрена')+'</b></div></div>');
  const stats=x.stats||{},publicationStats=(x.status==='published'||x.status==='archived')?section('<h2>Статистика объявления</h2><div class="stats-grid"><div>'+icon('eye')+'<span>Просмотры</span><b>'+Number(stats.views||0)+'</b></div><div>'+icon('heart')+'<span>В избранном</span><b>'+Number(stats.favorites||0)+'</b></div><div>'+icon('comment')+'<span>Обращения</span><b>'+Number(stats.contacts||0)+'</b></div><div>'+icon('box')+'<span>Предложения</span><b>'+(x.offers||[]).length+'</b></div></div>'):'';
  const actions=x.status==='published'?section('<div class="actions-stack">'+link(icon('comment')+'Написавшие <span class="count">'+(x.chats||[]).length+'</span>'+icon('next'),'/item/'+x.id+'/writers','btn outline')+'</div>'):'';
  const prices='';
