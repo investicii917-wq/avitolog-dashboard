@@ -9,7 +9,7 @@ import {REPOSITORY_SCHEMA,PAGE_SIZE,indexPath,indexRow,listingPaths,mediaDocumen
 const root=document.getElementById('app');
 const CONNECTION_KEY='avitolog-mailbox-connection-v1';
 let state,unlocked=false,mailboxConnection=null,draft=null,galleryIndex=0,toastTimer,photoBusy=false,photoSortSuppressClick=false,commitQueue=Promise.resolve(),mailboxSyncing=false,mailboxSyncTimer,mailboxResultSyncing=false,mailboxResultTimer,mailboxStateTimer,mailboxStateSyncing=false,mailboxStateFailed=false,calendarReturnPath='/analytics',repositoryProjectionHash='';
-const SITE_REFRESH_INTERVAL=5*60*1000,PROCESSED_FILE_LIMIT=1500;
+const ACTIVE_RESULT_REFRESH_INTERVAL=15*1000,IDLE_RESULT_REFRESH_INTERVAL=60*1000,PROCESSED_FILE_LIMIT=1500;
 const icons={
  back:'<path d="m15 5-7 7 7 7"/>',close:'<path d="m6 6 12 12M18 6 6 18"/>',
  plus:'<path d="M12 5v14M5 12h14"/>',calendar:'<rect x="3" y="5" width="18" height="16" rx="3"/><path d="M7 3v4m10-4v4M3 10h18m-13 5h.01M12 15h.01M17 15h.01"/>',
@@ -70,6 +70,7 @@ async function commit(transform){const job=commitQueue.then(async()=>{const next
 function queueMailboxSync(delay=250){clearTimeout(mailboxSyncTimer);mailboxSyncTimer=setTimeout(()=>{void syncMailbox();},delay);}
 function queueMailboxResultSync(delay=0){clearTimeout(mailboxResultTimer);mailboxResultTimer=setTimeout(()=>{void syncMailboxResults();},delay);}
 function queueMailboxStateSync(delay=3000){clearTimeout(mailboxStateTimer);mailboxStateTimer=setTimeout(()=>{void syncMailboxState();},delay);}
+function resultRefreshInterval(){return state?.items?.some(record=>record.status==='queue'||record.cardRequestStatus==='requested')?ACTIVE_RESULT_REFRESH_INTERVAL:IDLE_RESULT_REFRESH_INTERVAL;}
 const utcStamp=()=>{const d=new Date(),p=n=>String(n).padStart(2,'0');return d.getUTCFullYear()+p(d.getUTCMonth()+1)+p(d.getUTCDate())+p(d.getUTCHours())+p(d.getUTCMinutes())+p(d.getUTCSeconds());};
 const randomPart=()=>crypto.getRandomValues(new Uint32Array(1))[0].toString(36).padStart(7,'0');
 const mailboxEvent=(type,payload,markers={})=>{const id=uid(),operationId=markers.operationId||(type.startsWith('calendar.')?id:null);return {schema:'avitolog.mailbox.v1',id,type,operationId,createdAt:new Date().toISOString(),payload:operationId?{...payload,operationId}:payload,markers:{origin:'site',...markers,operationId}};};
@@ -473,8 +474,8 @@ async function syncMailboxInbox(){return importMailboxFolder('inbox','importedMa
 async function syncMailboxResults(){
  if(mailboxResultSyncing||!state||!mailboxConnection?.repo||!mailboxConnection?.accessKey)return;
  mailboxResultSyncing=true;
- try{await syncMailboxInbox();await importMailboxFolder('outbox','processedMailboxResults');}
- catch{}finally{mailboxResultSyncing=false;queueMailboxResultSync(SITE_REFRESH_INTERVAL);}
+ try{await syncMailboxState(true);await syncMailboxInbox();await importMailboxFolder('outbox','processedMailboxResults');}
+ catch{}finally{mailboxResultSyncing=false;queueMailboxResultSync(resultRefreshInterval());}
 }
 const btn=(label,action,cls='')=>'<button type="button" class="btn '+cls+'" data-action="'+action+'">'+label+'</button>';
 const link=(label,href,cls='')=>'<a class="'+cls+'" '+(label===icon('back')?'aria-label="Назад" ':label===icon('close')?'aria-label="Закрыть" ':label===icon('next')?'aria-label="Вперёд" ':'')+'href="#'+esc(href)+'">'+label+'</a>';
