@@ -702,7 +702,7 @@ function render(){
   let swipe=null;
   const count=Number(track.dataset.count)||1,counter=document.getElementById('gallery-counter');
   const page=()=>Math.round(track.scrollLeft/(track.clientWidth||1));
-  const setIndex=index=>{galleryIndex=((index%count)+count)%count;const active=track.children[page()]?.querySelector('img');if(active?.naturalWidth&&active?.naturalHeight)track.style.height=(track.clientWidth*active.naturalHeight/active.naturalWidth)+'px';if(counter)counter.textContent=(galleryIndex+1)+' / '+count;document.querySelectorAll('.gallery-thumbs [data-index]').forEach(button=>button.classList.toggle('active',Number(button.dataset.index)===galleryIndex));};
+  const setIndex=index=>{galleryIndex=((index%count)+count)%count;if(counter)counter.textContent=(galleryIndex+1)+' / '+count;document.querySelectorAll('.gallery-thumbs [data-index]').forEach(button=>button.classList.toggle('active',Number(button.dataset.index)===galleryIndex));};
   const jump=target=>{const behavior=track.style.scrollBehavior;track.style.scrollBehavior='auto';track.scrollLeft=target*(track.clientWidth||1);requestAnimationFrame(()=>{track.style.scrollBehavior=behavior;});setIndex(target);};
   const showPage=target=>{track.scrollTo({left:target*(track.clientWidth||1),behavior:'smooth'});setIndex(target);};
   const update=()=>setIndex(page());
