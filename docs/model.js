@@ -17,8 +17,9 @@ export function normalItem(x) {
  const quantity=Number.isInteger(suppliedQuantity)&&suppliedQuantity>=1?suppliedQuantity:null;
  const suppliedCardCount=Number(x.cardCount);
  const cardCount=Number.isInteger(suppliedCardCount)&&suppliedCardCount>=1&&suppliedCardCount<=10?suppliedCardCount:1;
- const pickupMinutes=Math.max(30,Number(x.pickupMinutes)||30);
- return {title:'Новое объявление',raw:'',description:'',photos:[],sourcePhotos:[],imageHistory:[],comments:[],cardComments:[],chats:[],price:null,fast:null,optimal:null,slow:null,pickupMinutes:30,delivery:false,stats:{views:0,favorites:0,contacts:0,messages:0,offers:0},offers:[],createdAt:new Date().toISOString(),productKind:'single',condition:'used',size:'',defects:'',quantity:null,generateCards:false,cardStyle:'realistic',cardCount:1,cardRequestKey:null,cardRequestStatus:null,...x,price,pickupMinutes,title:String(x.title||'Новое объявление').slice(0,50),productKind,condition:productKind==='single'?(x.condition==='new'?'new':'used'):null,size:String(x.size||'').slice(0,120),defects:String(x.defects||''),quantity,generateCards:!!x.generateCards,cardStyle:normalizeCardStyle(x.cardStyle),cardFormat:normalizeCardFormat(x.cardFormat),cardCount,photos:Array.isArray(x.photos)?x.photos:[],sourcePhotos:Array.isArray(x.sourcePhotos)?x.sourcePhotos:[],imageHistory:Array.isArray(x.imageHistory)?x.imageHistory:[],stats:{views:0,favorites:0,contacts:0,messages:0,offers:0,...(x.stats||{})},chats:Array.isArray(x.chats)?x.chats:[],comments:Array.isArray(x.comments)?x.comments:[],cardComments:Array.isArray(x.cardComments)?x.cardComments:[]};
+ const suppliedPickupMinutes=Number(x.pickupMinutes);
+ const pickupMinutes=Number.isFinite(suppliedPickupMinutes)&&suppliedPickupMinutes>0?suppliedPickupMinutes:60;
+ return {title:'Новое объявление',raw:'',description:'',photos:[],sourcePhotos:[],imageHistory:[],comments:[],cardComments:[],chats:[],price:null,fast:null,optimal:null,slow:null,pickupMinutes:60,delivery:false,stats:{views:0,favorites:0,contacts:0,messages:0,offers:0},offers:[],createdAt:new Date().toISOString(),productKind:'single',condition:'used',size:'',defects:'',quantity:null,generateCards:false,cardStyle:'realistic',cardCount:1,cardRequestKey:null,cardRequestStatus:null,...x,price,pickupMinutes,title:String(x.title||'Новое объявление').slice(0,50),productKind,condition:productKind==='single'?(x.condition==='new'?'new':'used'):null,size:String(x.size||'').slice(0,120),defects:String(x.defects||''),quantity,generateCards:!!x.generateCards,cardStyle:normalizeCardStyle(x.cardStyle),cardFormat:normalizeCardFormat(x.cardFormat),cardCount,photos:Array.isArray(x.photos)?x.photos:[],sourcePhotos:Array.isArray(x.sourcePhotos)?x.sourcePhotos:[],imageHistory:Array.isArray(x.imageHistory)?x.imageHistory:[],stats:{views:0,favorites:0,contacts:0,messages:0,offers:0,...(x.stats||{})},chats:Array.isArray(x.chats)?x.chats:[],comments:Array.isArray(x.comments)?x.comments:[],cardComments:Array.isArray(x.cardComments)?x.cardComments:[]};
 }
 export function receiveEvent(state,event) {
  if(!event || !event.id || !event.type) throw Error('У события должны быть id и type');
@@ -65,7 +66,7 @@ export function addBooking(state,p){
  if(!offer)throw Error('Для встречи требуется предложение покупателя');
  if(offer.method!==slot.kind)throw Error('Способ получения не совпадает с интервалом');
  if(offer.status!=='pending')throw Error('Это предложение уже обработано');
- const s=structuredClone(state),duration=Math.max(30,Number(item.pickupMinutes)||30),at=new Date().toISOString();
+ const s=structuredClone(state),duration=Math.max(30,Number(item.pickupMinutes)||60),at=new Date().toISOString();
  s.bookings.push({...p,id:uid(),operationId:p.operationId||uid(),date:slot.date,to:toTime(minutes(p.from)+duration),status:'scheduled',method:slot.kind,createdAt:at,updatedAt:at});
  if(offer)s.items.find(x=>x.id===item.id).offers.find(o=>o.id===offer.id).status='accepted';
  return s;
