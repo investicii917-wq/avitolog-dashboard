@@ -174,6 +174,8 @@ const hubOwner=()=>String(mailboxConnection?.repo||'').split('/')[0]||'';
 const monthKey=()=>new Intl.DateTimeFormat('sv-SE',{timeZone:'Europe/Moscow',year:'numeric',month:'2-digit'}).format(new Date());
 const itemRepositoryName=record=>'item-'+String(record.id||'').toLowerCase().replace(/[^a-z0-9-]/g,'').slice(0,48)+'-'+monthKey();
 const repositoryPath=(repo,path='')=>'https://api.github.com/repos/'+String(repo).split('/').map(encodeURIComponent).join('/')+'/contents'+(path?'/'+path.split('/').map(encodeURIComponent).join('/'):'');
+const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+const itemRepositoryReady=new Map();
 
 async function repositoryRequest(repo,path,options={}){
  const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),20000);
@@ -187,27 +189,44 @@ async function putRepositoryFileNow(repo,path,content,message,{ifMissing=false}=
  if(current.ok){const existing=await current.json();if(ifMissing)return false;if(existing.content&&existing.encoding==='base64'&&String(existing.content).replace(/\s/g,'')===String(content).replace(/\s/g,''))return false;if(existing.sha)body.sha=existing.sha;}
  else if(current.status!==404)throw Error('Не удалось проверить данные объявления');
  const response=await repositoryRequest(repo,path,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
- if([409,422].includes(response.status)&&attempt<4)continue;
+  if([409,422].includes(response.status)&&attempt<4){await pause(250*(attempt+1));continue;}
  if(!response.ok)throw Error('Не удалось сохранить данные объявления');
  return true;
  }
 }
 const repositoryJson=(repo,path,value,message,options={})=>putRepositoryFile(repo,path,textBase64(JSON.stringify(value,null,2)),message,options);
 
-async function ensureItemRepository(record){
- if(record?.itemRepository)return record.itemRepository;
- if(!record?.id||!hubOwner())throw Error('Не удалось определить объявление');
- const target=hubOwner()+'/'+itemRepositoryName(record);
- const payload={name:target.split('/')[1],private:true,auto_init:true,description:'Avitolog listing '+record.id};
- let response=await fetch('https://api.github.com/user/repos',{method:'POST',headers:{Accept:'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28',Authorization:'Bearer '+mailboxConnection.accessKey,'Content-Type':'application/json'},body:JSON.stringify(payload)});
- if(!response.ok&&response.status===422)response=await repositoryRequest(target,'');
- if(!response.ok)throw Error('Не удалось создать репозиторий объявления. Проверьте права секретного ключа.');
- record.itemRepository=target;record.itemMonth=monthKey();record.itemLoaded=true;
+async function waitForItemRepository(target){
+ for(let attempt=0;attempt<8;attempt++){
+  const response=await repositoryRequest(target,'');
+  if(response.ok)return;
+  if(![404,409,422].includes(response.status))throw Error('Репозиторий объявления недоступен: '+response.status);
+  await pause(Math.min(5000,400*2**attempt));
+ }
+ throw Error('Новый репозиторий объявления пока не готов. Отправка будет повторена автоматически.');
+}
+async function initializeItemRepository(record,target){
+ await waitForItemRepository(target);
  await repositoryJson(target,'offers.json',{schemaVersion:1,listingId:record.id,offers:record.offers||[]},'Initialize offers',{ifMissing:true});
  await repositoryJson(target,'contacts.json',{schemaVersion:1,listingId:record.id,contacts:record.chats||[]},'Initialize contacts',{ifMissing:true});
  await repositoryJson(target,'tasks/in/.gitkeep',{},'Initialize task inbox',{ifMissing:true});
  await repositoryJson(target,'tasks/out/.gitkeep',{},'Initialize task outbox',{ifMissing:true});
  return target;
+}
+async function ensureItemRepository(record){
+ let target=record?.itemRepository;
+ if(!record?.id||!hubOwner())throw Error('Не удалось определить объявление');
+ if(!target){
+  target=hubOwner()+'/'+itemRepositoryName(record);
+  const payload={name:target.split('/')[1],private:true,auto_init:true,description:'Avitolog listing '+record.id};
+  let response=await fetch('https://api.github.com/user/repos',{method:'POST',headers:{Accept:'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28',Authorization:'Bearer '+mailboxConnection.accessKey,'Content-Type':'application/json'},body:JSON.stringify(payload)});
+  if(!response.ok&&response.status===422)response=await repositoryRequest(target,'');
+  if(!response.ok)throw Error('Не удалось создать репозиторий объявления. Для ключа нужны права Contents: Read and write и Repository creation: Write.');
+  record.itemRepository=target;record.itemMonth=monthKey();record.itemLoaded=true;
+ }
+ let ready=itemRepositoryReady.get(target);
+ if(!ready){ready=initializeItemRepository(record,target);itemRepositoryReady.set(target,ready);}
+ try{return await ready;}catch(error){itemRepositoryReady.delete(target);throw error;}
 }
 async function removeItemRepository(record){
  if(!record?.itemRepository)return;
