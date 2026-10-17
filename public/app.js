@@ -265,16 +265,21 @@ async function syncListingProjection(record){
  const repo=await ensureItemRepository(record);
  await hydrateListingMedia(record,true);
  const document=await itemDocument(record,repo);
+ const current=await repositoryRequest(repo,'listing.json');
+ if(current.ok){
+  const remoteDocument=await decodeRepositoryJson(repo,'listing.json',await current.json()),remoteItem=remoteDocument.item||{};
+  if(itemTime(remoteItem)>itemTime(record)||Number(remoteDocument.revision||0)>Number(document.revision||0))return {repo,document:remoteDocument,record:normalItem({...remoteItem,itemRepository:repo,itemLoaded:true}),skipped:true};
+ }else if(current.status!==404)throw Error('Не удалось проверить актуальность объявления');
  await repositoryJson(repo,'listing.json',document,'Update listing');
  await syncStatusFolder(repo,document);
  await repositoryJson(repo,'offers.json',{schemaVersion:1,listingId:record.id,revision:record.revision||0,updatedAt:document.updatedAt,offers:record.offers||[]},'Update offers');
  await repositoryJson(repo,'contacts.json',{schemaVersion:1,listingId:record.id,revision:record.revision||0,updatedAt:document.updatedAt,contacts:record.chats||[]},'Update contacts');
- return {repo,document};
+ return {repo,document,record};
 }
 function hubListingRow(record,document){
- const photo=document?.item?.photos?.[0]||{};
- const activeOffer=(record.offers||[]).find(offer=>offer.status==='pending')||null;
- return {listingId:record.id,title:record.title,status:record.status,price:record.price,coverPath:photo.path||photo.mediaPath||null,itemRepository:record.itemRepository,revision:record.revision||0,updatedAt:record.updatedAt||record.createdAt||null,stats:record.stats||{},activeOffer:activeOffer?{id:activeOffer.id,price:activeOffer.price,buyer:activeOffer.buyer||'',createdAt:activeOffer.createdAt||null}:null};
+ const source=document?.item||record,photo=source.photos?.[0]||{};
+ const activeOffer=(source.offers||record.offers||[]).find(offer=>offer.status==='pending')||null;
+ return {listingId:source.id,title:source.title,status:source.status,price:source.price,coverPath:photo.path||photo.mediaPath||null,itemRepository:source.itemRepository||record.itemRepository,revision:source.revision||document?.revision||0,updatedAt:source.updatedAt||document?.updatedAt||source.createdAt||null,stats:source.stats||{},activeOffer:activeOffer?{id:activeOffer.id,price:activeOffer.price,buyer:activeOffer.buyer||'',createdAt:activeOffer.createdAt||null}:null};
 }
 let projectionQueue=Promise.resolve();
 function syncRepositoryProjection(snapshot){
@@ -308,7 +313,7 @@ async function syncRepositoryProjectionNow(snapshot){
   const remote=remoteRows.get(record.id);
   if(remote&&itemTime(remote)>=itemTime(record))continue;
   const saved=await syncListingProjection(record);
-  if(saved)rows.push(hubListingRow(record,saved.document));
+  if(saved)rows.push(hubListingRow(saved.record||record,saved.document));
  }
  await updateManifest(rows,deleted);
  const pending=(source.outbox||[]).filter(task=>!task.deliveredAt);
@@ -351,7 +356,7 @@ async function sendMailboxEvent(task){
  }
  if(record){
   const saved=await syncListingProjection(record);
-  if(saved)await updateManifest([hubListingRow(record,saved.document)],state.deletedMailboxItemIds||[]);
+  if(saved)await updateManifest([hubListingRow(saved.record||record,saved.document)],state.deletedMailboxItemIds||[]);
  }
  if(repo)await writeTaskProjection(task,attachmentNames,repo);
  await mailboxJson('inbox/'+prefix+'-command.json',{schema:'avitolog.hub-command.v1',taskId:task.id,listingId:listingId||null,type:task.type,createdAt:task.createdAt,itemRepository:repo,taskPath:repo?'tasks/in/'+task.id+'.json':null},'Add hub command');
