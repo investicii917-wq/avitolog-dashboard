@@ -3,7 +3,7 @@ import {installPhotoSort} from './photo-sort.js?v=2';
 import {CARD_STYLES,normalizeCardStyle,normalizeCardFormat,cardSpec,cardRequestKey,cardResultProblem} from './cards.js?v=4';
 
 import {readState,saveState,readPhotoMedia,cachePhotoMedia} from './data.js?v=11';
-import {uid,todayKey,normalItem,receiveEvent,addSlot,addBooking,freeTimes,dayLoad,minutes,blankState} from './model.js?v=16';
+import {uid,todayKey,normalItem,receiveEvent,addSlot,addBooking,freeTimes,dayLoad,minutes,blankState} from './model.js?v=17';
 import {calendarDocument,calendarChanged,mergeCalendar,CALENDAR_SCHEMA_VERSION} from './calendar.js?v=2';
 import {REPOSITORY_SCHEMA,PAGE_SIZE,indexPath,indexRow,listingPaths,mediaDocument,splitPages,taskDocument} from './repository-v2.js?v=2';
 const root=document.getElementById('app');
