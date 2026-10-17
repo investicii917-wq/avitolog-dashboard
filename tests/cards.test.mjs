@@ -83,6 +83,8 @@ const third=second;
 check(third.items[0].cardStyle==='designer'&&third.items[0].cardFormat==='landscape'&&third.items[0].photos[0].mediaPath&&third.items[0].imageHistory[0].photos[0].mediaPath);
 const cleanManifest=JSON.parse(api.mailboxManifest({...event,payload:{...event.payload,item:{...base,sourcePhotos:base.photos}}},['original.png']));
 check(!JSON.stringify(cleanManifest).includes('data:image'));
+  const createdManifest=JSON.parse(api.mailboxManifest({...event,type:'item.created',payload:{item:{...base,imageHistory:[{id:'history',photos:base.photos}]}}},['original.png']));
+  check(!JSON.stringify(createdManifest).includes('data:image'));
 context.fetch=async(url,options)=>({ok:true,text:async()=>JSON.stringify({big:true,text:'x'.repeat(1100000)})});
 const large=await api.decodeMailboxJson('state/site-state.json',{encoding:'none',content:''});
 check(large.big&&large.text.length===1100000);
