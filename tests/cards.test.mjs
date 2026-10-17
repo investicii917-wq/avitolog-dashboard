@@ -53,6 +53,7 @@ const memoryRepo=new Map(),puts=[];
 context.fetch=async(url,options={})=>{
  if(url==='https://api.github.com/user/repos'&&options.method==='POST')return {ok:true,status:201,json:async()=>({})};
  const path=decodeURIComponent(url.split('/contents/')[1]||'');
+  if(!path&&!options.method)return {ok:true,status:200,json:async()=>[]};
  if(options.method==='PUT'){
   const body=JSON.parse(options.body);memoryRepo.set(path,body.content);puts.push(path);return {ok:true,status:201};
  }
