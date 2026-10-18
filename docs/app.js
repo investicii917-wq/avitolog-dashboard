@@ -242,6 +242,7 @@ async function itemSnapshotPhoto(record,photo,bucket,repo){
 }
 async function itemDocument(record,repo){
  const copy=structuredClone(record);
+ delete copy.syncState;delete copy.syncError;delete copy.syncFailedAt;delete copy.syncedAt;
  copy.photos=await Promise.all((copy.photos||[]).map(photo=>itemSnapshotPhoto(record,photo,record.generatedCards?'generated':'originals',repo)));
  copy.sourcePhotos=await Promise.all((copy.sourcePhotos||[]).map(photo=>itemSnapshotPhoto(record,photo,'originals',repo)));
  copy.imageHistory=await Promise.all((copy.imageHistory||[]).map(async group=>({...group,photos:await Promise.all((group.photos||[]).map(photo=>itemSnapshotPhoto(record,photo,group.kind==='generated'?'generated':'originals',repo)))})));
@@ -359,13 +360,19 @@ async function sendMailboxEvent(task){
   if(saved)await updateManifest([hubListingRow(saved.record||record,saved.document)],state.deletedMailboxItemIds||[]);
  }
  if(repo)await writeTaskProjection(task,attachmentNames,repo);
- await mailboxJson('inbox/'+prefix+'-command.json',{schema:'avitolog.hub-command.v1',taskId:task.id,listingId:listingId||null,type:task.type,createdAt:task.createdAt,itemRepository:repo,taskPath:repo?'tasks/in/'+task.id+'.json':null},'Add hub command');
- await syncRepositoryProjection({state,savedAt:new Date().toISOString()});
+ const commandPath='inbox/'+prefix+'-command.json';
+ await mailboxJson(commandPath,{schema:'avitolog.hub-command.v1',taskId:task.id,listingId:listingId||null,type:task.type,createdAt:task.createdAt,itemRepository:repo,taskPath:repo?'tasks/in/'+task.id+'.json':null},'Add hub command');
+ const confirmation=await mailboxRequest(commandPath);
+ if(!confirmation.ok)throw Error('Не подтверждена запись команды: HTTP '+confirmation.status);
+ const delivered=await decodeMailboxJson(commandPath,await confirmation.json());
+ if(delivered.taskId!==task.id||delivered.itemRepository!==repo)throw Error('Подтверждение команды не совпадает с отправленным объявлением');
+ // Other listings are synced separately; their failures must not undo this delivery.
+ queueMailboxStateSync();
 }
 async function syncMailbox(){
  if(mailboxSyncing||!state||!mailboxConnection?.repo||!mailboxConnection?.accessKey)return;
  mailboxSyncing=true;
- try{for(const task of state.outbox.filter(x=>!x.deliveredAt)){try{await sendMailboxEvent(task);}catch(error){mailboxStateFailed=true;toast('Объявление сохранено на устройстве. Отправка повторится: '+error.message);queueMailboxSync(10000);return;}await commit(s=>{const saved=s.outbox.find(x=>x.id===task.id);if(saved)saved.deliveredAt=new Date().toISOString();return s;});}}
+ try{for(const task of state.outbox.filter(x=>!x.deliveredAt)){try{await sendMailboxEvent(task);}catch(error){const message=String(error?.message||'Неизвестная ошибка отправки');mailboxStateFailed=true;await commit(s=>{const listingId=task.markers?.listingId||task.payload?.itemId||task.payload?.item?.id,record=s.items.find(value=>value.id===listingId);if(record){record.syncState='pending';record.syncError=message;record.syncFailedAt=new Date().toISOString();}return s;});toast('Объявление сохранено на устройстве. Отправка повторится: '+message);queueMailboxSync(10000);return;}await commit(s=>{const saved=s.outbox.find(x=>x.id===task.id);if(saved)saved.deliveredAt=new Date().toISOString();const listingId=task.markers?.listingId||task.payload?.itemId||task.payload?.item?.id,hasPending=s.outbox.some(value=>!value.deliveredAt&&value.id!==task.id&&(value.markers?.listingId===listingId||value.payload?.itemId===listingId||value.payload?.item?.id===listingId)),record=s.items.find(value=>value.id===listingId);if(record&&!hasPending){record.syncState='synced';record.syncedAt=new Date().toISOString();delete record.syncError;delete record.syncFailedAt;}return s;});}}
  finally{mailboxSyncing=false;if(state?.outbox.some(x=>!x.deliveredAt))queueMailboxSync(10000);}
 }
 const base64Text=value=>{const binary=atob(String(value||'').replace(/\s/g,'')),bytes=Uint8Array.from(binary,c=>c.charCodeAt(0));return new TextDecoder().decode(bytes);};
@@ -492,7 +499,7 @@ function header(tab){
  const readyCount=state.items.filter(x=>x.status==='queue'||x.status==='ready'||x.status==='archived').length,publishedCount=state.items.filter(x=>x.status==='published').length,offerCount=state.items.reduce((n,x)=>n+(x.offers||[]).filter(o=>o.status==='pending').length,0);
  const tabs=[['analytics','Аналитика','Аналит.','/analytics',offerCount],['ready','Готовые','Готовые','/list/ready',readyCount],['published','Публик.','Публик.','/list/published',publishedCount]];
  return '<header class="main-head"><a class="calendar-link '+(tab==='calendar'?'active':'')+'" data-action="calendar-toggle" href="#/calendar">'+icon('calendar')+'Календарь</a><nav class="tabs" aria-label="Разделы">'+tabs.map(([key,label,short,href,count])=>link('<span class="long-label">'+label+'</span><span class="short-label">'+short+'</span><span class="count">'+count+'</span>',href,'tab '+(tab===key?'active':''))).join('')+'</nav></header>';}
-function statusIndicator(x){const status=typeof x==='string'?x:x.status,labels={ready:'Готово к публикации',queue:'В обработке',archived:'Архив'},date=status==='archived'&&x.archivedAt?'<span class="archive-date">с '+shortDate(x.archivedAt.slice(0,10))+'</span>':'';return '<span class="processing-status '+(status==='ready'?'ready':status==='archived'?'archived':'processing')+'">'+labels[status]+'</span>'+date;}
+function statusIndicator(x){if(typeof x!=='string'){const pending=state?.outbox?.some(task=>!task.deliveredAt&&(task.markers?.listingId===x.id||task.payload?.itemId===x.id||task.payload?.item?.id===x.id));if(pending&&!x.syncError)return '<span class="processing-status processing">Отправляется в GitHub</span>';if(x.syncError)return '<span class="processing-status archived">Не отправлено: '+esc(x.syncError)+'</span>';}const status=typeof x==='string'?x:x.status,labels={ready:'Готово к публикации',queue:'В обработке',archived:'Архив'},date=status==='archived'&&x.archivedAt?'<span class="archive-date">с '+shortDate(x.archivedAt.slice(0,10))+'</span>':'';return '<span class="processing-status '+(status==='ready'?'ready':status==='archived'?'archived':'processing')+'">'+labels[status]+'</span>'+date;}
 function analyticsPage(){
  const published=state.items.filter(x=>x.status==='published');
  const colors=['#718fbc','#d1b16b','#b77949','#98515a','#8b755b','#6e6870'];
@@ -762,13 +769,13 @@ async function saveItem(form){
  const data={...(isNew?{}:item(draft.id)),id:isNew?uid():draft.id,status:isNew?'queue':draft.status,title:isNew?(raw.split(/[\n.!?]/)[0]||'Новое объявление').slice(0,50):String(f.get('title')||'').trim(),raw,description:isNew?'':String(f.get('description')||''),photos:draft.photos,imageHistory:structuredClone(draft.imageHistory||[]),price:f.get('price')===''?null:Number(f.get('price')),pickupMinutes:isNew?60:Number(f.get('pickupMinutes')),delivery:!isNew&&f.has('delivery'),productKind,condition:productKind==='single'?(f.get('condition')==='new'?'new':'used'):null,defects:String(f.get('defects')||'').trim(),quantity,generateCards:f.has('generateCards'),cardStyle:normalizeCardStyle(f.get('cardStyle')),cardFormat:normalizeCardFormat(f.get('cardFormat')),cardCount:Number(f.get('cardCount'))||1,updatedAt:new Date().toISOString()};
  const existing=isNew?null:item(draft.id);
  if(existing)data.cardGenerationSettings=existing.cardGenerationSettings||cardSettingsKey(existing);
- if(isNew)data.sourcePhotos=structuredClone(draft.photos);
+ if(isNew){data.sourcePhotos=structuredClone(draft.photos);data.syncState='pending';delete data.syncError;delete data.syncFailedAt;}
  else data.sourcePhotos=structuredClone(draft.sourcePhotos||existing?.sourcePhotos||[]);
    if(data.pickupMinutes<30||data.pickupMinutes>480)throw Error('Укажите время получения от 30 до 480 минут');
  const event={id:uid(),type:'item.upsert',payload:normalItem(data)};
  if(isNew)clearTimeout(draftSaveTimer);
  await commit(s=>{const next=receiveEvent(s,event),saved=next.items.find(x=>x.id===data.id),{signature,previous}=isNew?prepareCardRequest(saved,null):{signature:null,previous:null};next.newDraft=null;addOutbox(next,isNew?'item.created':'item.edited',{itemId:data.id,item:saved},{...listingMarkers(saved,isNew?'listing.create':'listing.update'),cards:{...cardSpec(saved),requested:isNew&&!!signature},generateImages:isNew&&!!signature});if(signature&&signature!==previous)addOutbox(next,'cards.requested',{itemId:data.id,item:cardInputItem(saved),sourcePhotos:structuredClone(activeCardPhotos(saved)),requestId:uid(),...cardSpec(saved),requestKey:signature,photoIds:activeCardPhotos(saved).map(p=>p.id)},{action:'cards.generate',listingId:data.id,cards:{...cardSpec(saved),requestKey:signature}});return next;});
- draft=null;go(isNew?'/list/ready':'/item/'+data.id);toast(isNew?'Объявление добавлено':'Изменения сохранены');
+ draft=null;go(isNew?'/list/ready':'/item/'+data.id);toast(isNew?'Объявление добавлено. Отправляем в GitHub…':'Изменения сохранены. Отправляем в GitHub…');
 }
 root.addEventListener('submit',async e=>{
  e.preventDefault();const form=e.target;if(!form.checkValidity()){form.reportValidity();return;}
@@ -918,9 +925,12 @@ async function boot(){
   unlocked=!!(mailboxConnection?.repo&&mailboxConnection?.accessKey);
   if(unlocked){
    state=await readState();
-   void syncMailboxState(true).then(()=>{render();queueMailboxSync();queueMailboxResultSync();});
+   queueMailboxSync();queueMailboxResultSync();
+   void syncMailboxState(true).then(()=>{render();});
   }
   render();
  }catch(e){root.innerHTML='<main class="login"><div class="login-card"><h1>Не удалось открыть хранилище</h1><p>'+esc(e.message)+'</p><p>Разрешите хранение данных для сайта и обновите страницу.</p></div></main>';}
 }
+if(typeof window!=='undefined'&&window.addEventListener)window.addEventListener('online',()=>{queueMailboxSync();queueMailboxStateSync();queueMailboxResultSync();});
+if(typeof document!=='undefined'&&document.addEventListener)document.addEventListener('visibilitychange',()=>{if(!document.hidden){queueMailboxSync();queueMailboxStateSync();queueMailboxResultSync();}});
 boot();

@@ -34,7 +34,8 @@ function harness(){
  let version=0,conflict=false;
  context.fetch=async(url,options={})=>{
   const route=new URL(url).pathname,method=options.method||'GET';requests.push({route,method});
-  if(route==='/user/repos')return response(201,{});
+  if(route==='/user/repos'){const body=JSON.parse(options.body);files.set('/repos/owner/'+body.name+'/contents',{sha:'initial',content:'',encoding:'base64'});return response(201,{});}
+  if(method==='GET'&&route.endsWith('/contents')&&[...files.keys()].some(path=>path.startsWith(route+'/')))return response(200,[]);
   if(method==='GET'){const entry=files.get(route);return response(entry?200:404,entry||{});}
   const repository=route.split('/contents/')[0];
   if(active.has(repository))return response(409,{});
