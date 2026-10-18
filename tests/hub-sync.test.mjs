@@ -71,6 +71,22 @@ test('actual dispatch stores media and listing before command, merges conflict, 
  assert.ok(command>h.requests.findIndex(x=>x.method==='PUT'&&x.route.endsWith('/listing.json')));
  await h.api.loadHubState();assert.ok(h.api.state().items.some(x=>x.id==='new-id'));assert.equal(h.api.state().outbox.length,1);
 });
+for(const variant of [{productKind:'single',condition:'new'},{productKind:'single',condition:'used'},{productKind:'batch',quantity:25}])test('delivery preserves product variant '+JSON.stringify(variant),async()=>{
+ const h=harness(),record=model.normalItem({id:'variant',status:'queue',title:'Product',...variant,photos:[{id:'photo',src:'data:image/png;base64,YQ==',type:'image/png'}]});
+ const task={id:'variant-task',type:'item.created',createdAt:'2026-10-18T12:00:00Z',payload:{itemId:record.id,item:record},markers:{listingId:record.id}};
+ h.api.setup({...model.blankState(),items:[record],outbox:[task]});
+ await h.api.sendMailboxEvent(task);
+ await h.api.sendMailboxEvent(task);
+ const listing=[...h.files.entries()].find(([path])=>path.endsWith('/contents/listing.json'));
+ const stored=JSON.parse(Buffer.from(listing[1].content,'base64')).item;
+ assert.equal(stored.productKind,variant.productKind);
+ if(variant.productKind==='single')assert.equal(stored.condition,variant.condition);else assert.equal(stored.quantity,25);
+ const commands=[...h.files.keys()].filter(path=>path.endsWith('-command.json'));
+ assert.equal(commands.length,1,'retry must not duplicate the command');
+ const lastRead=h.requests.findLast(request=>request.method==='GET'&&request.route.endsWith('-command.json'));
+ assert.ok(lastRead,'delivery must be read back from GitHub');
+});
+
 test('empty device cannot overwrite full listings or registry',async()=>{
  const h=harness();h.api.setup(model.blankState());await h.api.updateManifest([row('a')]);await h.api.syncRepositoryProjection({state:model.blankState()});
  const m=JSON.parse(Buffer.from(h.files.get('/repos/owner/hub/contents/registry/listings.json').content,'base64'));
