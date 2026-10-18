@@ -17,7 +17,7 @@ for(const style of ['realistic','studio','designer'])for(const format of ['auto'
 const legacy=model.normalItem({id:'old',status:'ready'});
 check(legacy.cardFormat==='auto'&&legacy.cardStyle==='realistic');
 check(cards.cardSpec(legacy).count===0);
-check(model.normalItem({id:'legacy-pickup',status:'ready',pickupMinutes:0}).pickupMinutes===30);
+check(model.normalItem({id:'legacy-pickup',status:'ready',pickupMinutes:0}).pickupMinutes===60);
 const base=model.normalItem({id:'x',status:'queue',raw:'Клавиатура',description:'Описание для карточки',defects:'Внутренняя заметка',generateCards:true,cardStyle:'designer',cardFormat:'landscape',cardCount:3,photos:[{id:'src',type:'image/png',src:'data:image/png;base64,YQ==',name:'original.png'}],sourcePhotos:[{id:'src',type:'image/png',src:'data:image/png;base64,YQ==',name:'original.png'}]});
 base.cardRequestKey=cards.cardRequestKey(base);
 check(cards.cardRequestKey(structuredClone(base))===base.cardRequestKey);
@@ -36,6 +36,9 @@ const context=vm.createContext({...cards,...model,mergeManifest,taskDocument,cry
  document:{getElementById:()=>fakeRoot},window:{addEventListener(){}},location:{hash:''},
  saveState:async()=>{},readState:async()=>model.blankState()});
 let source=fs.readFileSync(new URL('../docs/app.js',import.meta.url),'utf8').replace(/^import .*;\r?\n/gm,'').replace(/\nboot\(\);\s*$/,'');
+const galleryStyles=fs.readFileSync(new URL('../docs/style.css',import.meta.url),'utf8');
+check(!source.includes('track.style.height='));
+check(galleryStyles.includes('Постоянный квадратный экран карточек')&&galleryStyles.includes('Фикс: каждая карточка полностью помещается'));
 source+='\nstate=blankState();\nglobalThis.testApi={cardsHtml,mailboxManifest,applyMailboxEvent,sendMailboxEvent,restoreMailboxPhotos,connect:(c)=>{mailboxConnection=c},prepareCardRequest,decodeMailboxJson,readMailboxJson,availableImageHistory,cardInputItem};';
 vm.runInContext(source,context);
 const api=context.testApi;

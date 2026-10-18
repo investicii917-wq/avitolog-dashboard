@@ -3,13 +3,13 @@ import {installPhotoSort} from './photo-sort.js?v=2';
 import {CARD_STYLES,normalizeCardStyle,normalizeCardFormat,cardSpec,cardRequestKey,cardResultProblem} from './cards.js?v=4';
 
 import {readState,saveState,readPhotoMedia,cachePhotoMedia} from './data.js?v=11';
-import {uid,todayKey,normalItem,receiveEvent,addSlot,addBooking,freeTimes,dayLoad,minutes,blankState} from './model.js?v=16';
+import {uid,todayKey,normalItem,receiveEvent,addSlot,addBooking,freeTimes,dayLoad,minutes,blankState} from './model.js?v=17';
 import {calendarDocument,calendarChanged,mergeCalendar,CALENDAR_SCHEMA_VERSION} from './calendar.js?v=2';
 import {REPOSITORY_SCHEMA,PAGE_SIZE,indexPath,indexRow,listingPaths,mediaDocument,splitPages,taskDocument} from './repository-v2.js?v=2';
 const root=document.getElementById('app');
 const CONNECTION_KEY='avitolog-mailbox-connection-v1';
 let state,unlocked=false,mailboxConnection=null,draft=null,galleryIndex=0,toastTimer,photoBusy=false,photoSortSuppressClick=false,commitQueue=Promise.resolve(),mailboxSyncing=false,mailboxSyncTimer,mailboxResultSyncing=false,mailboxResultTimer,mailboxStateTimer,mailboxStateSyncing=false,mailboxStateFailed=false,calendarReturnPath='/analytics',repositoryProjectionHash='';
-const SITE_REFRESH_INTERVAL=5*60*1000,PROCESSED_FILE_LIMIT=1500;
+const ACTIVE_RESULT_REFRESH_INTERVAL=15*1000,IDLE_RESULT_REFRESH_INTERVAL=60*1000,PROCESSED_FILE_LIMIT=1500;
 const icons={
  back:'<path d="m15 5-7 7 7 7"/>',close:'<path d="m6 6 12 12M18 6 6 18"/>',
  plus:'<path d="M12 5v14M5 12h14"/>',calendar:'<rect x="3" y="5" width="18" height="16" rx="3"/><path d="M7 3v4m10-4v4M3 10h18m-13 5h.01M12 15h.01M17 15h.01"/>',
@@ -70,6 +70,7 @@ async function commit(transform){const job=commitQueue.then(async()=>{const next
 function queueMailboxSync(delay=250){clearTimeout(mailboxSyncTimer);mailboxSyncTimer=setTimeout(()=>{void syncMailbox();},delay);}
 function queueMailboxResultSync(delay=0){clearTimeout(mailboxResultTimer);mailboxResultTimer=setTimeout(()=>{void syncMailboxResults();},delay);}
 function queueMailboxStateSync(delay=3000){clearTimeout(mailboxStateTimer);mailboxStateTimer=setTimeout(()=>{void syncMailboxState();},delay);}
+function resultRefreshInterval(){return state?.items?.some(record=>record.status==='queue'||record.cardRequestStatus==='requested')?ACTIVE_RESULT_REFRESH_INTERVAL:IDLE_RESULT_REFRESH_INTERVAL;}
 const utcStamp=()=>{const d=new Date(),p=n=>String(n).padStart(2,'0');return d.getUTCFullYear()+p(d.getUTCMonth()+1)+p(d.getUTCDate())+p(d.getUTCHours())+p(d.getUTCMinutes())+p(d.getUTCSeconds());};
 const randomPart=()=>crypto.getRandomValues(new Uint32Array(1))[0].toString(36).padStart(7,'0');
 const mailboxEvent=(type,payload,markers={})=>{const id=uid(),operationId=markers.operationId||(type.startsWith('calendar.')?id:null);return {schema:'avitolog.mailbox.v1',id,type,operationId,createdAt:new Date().toISOString(),payload:operationId?{...payload,operationId}:payload,markers:{origin:'site',...markers,operationId}};};
@@ -262,18 +263,23 @@ async function syncStatusFolder(repo,document){
 async function syncListingProjection(record){
  if(!record?.id||record.itemLoaded===false)return null;
  const repo=await ensureItemRepository(record);
- await hydrateListingMedia(record,true);
+ await hydrateListingMedia(record,true,{sources:true,history:true});
  const document=await itemDocument(record,repo);
+ const current=await repositoryRequest(repo,'listing.json');
+ if(current.ok){
+  const remoteDocument=await decodeRepositoryJson(repo,'listing.json',await current.json()),remoteItem=remoteDocument.item||{};
+  if(itemTime(remoteItem)>itemTime(record)||Number(remoteDocument.revision||0)>Number(document.revision||0))return {repo,document:remoteDocument,record:normalItem({...remoteItem,itemRepository:repo,itemLoaded:true}),skipped:true};
+ }else if(current.status!==404)throw Error('Не удалось проверить актуальность объявления');
  await repositoryJson(repo,'listing.json',document,'Update listing');
  await syncStatusFolder(repo,document);
  await repositoryJson(repo,'offers.json',{schemaVersion:1,listingId:record.id,revision:record.revision||0,updatedAt:document.updatedAt,offers:record.offers||[]},'Update offers');
  await repositoryJson(repo,'contacts.json',{schemaVersion:1,listingId:record.id,revision:record.revision||0,updatedAt:document.updatedAt,contacts:record.chats||[]},'Update contacts');
- return {repo,document};
+ return {repo,document,record};
 }
 function hubListingRow(record,document){
- const photo=document?.item?.photos?.[0]||{};
- const activeOffer=(record.offers||[]).find(offer=>offer.status==='pending')||null;
- return {listingId:record.id,title:record.title,status:record.status,price:record.price,coverPath:photo.path||photo.mediaPath||null,itemRepository:record.itemRepository,revision:record.revision||0,updatedAt:record.updatedAt||record.createdAt||null,stats:record.stats||{},activeOffer:activeOffer?{id:activeOffer.id,price:activeOffer.price,buyer:activeOffer.buyer||'',createdAt:activeOffer.createdAt||null}:null};
+ const source=document?.item||record,photo=source.photos?.[0]||{};
+ const activeOffer=(source.offers||record.offers||[]).find(offer=>offer.status==='pending')||null;
+ return {listingId:source.id,title:source.title,status:source.status,price:source.price,coverPath:photo.path||photo.mediaPath||null,itemRepository:source.itemRepository||record.itemRepository,revision:source.revision||document?.revision||0,updatedAt:source.updatedAt||document?.updatedAt||source.createdAt||null,stats:source.stats||{},activeOffer:activeOffer?{id:activeOffer.id,price:activeOffer.price,buyer:activeOffer.buyer||'',createdAt:activeOffer.createdAt||null}:null};
 }
 let projectionQueue=Promise.resolve();
 function syncRepositoryProjection(snapshot){
@@ -307,7 +313,7 @@ async function syncRepositoryProjectionNow(snapshot){
   const remote=remoteRows.get(record.id);
   if(remote&&itemTime(remote)>=itemTime(record))continue;
   const saved=await syncListingProjection(record);
-  if(saved)rows.push(hubListingRow(record,saved.document));
+  if(saved)rows.push(hubListingRow(saved.record||record,saved.document));
  }
  await updateManifest(rows,deleted);
  const pending=(source.outbox||[]).filter(task=>!task.deliveredAt);
@@ -350,7 +356,7 @@ async function sendMailboxEvent(task){
  }
  if(record){
   const saved=await syncListingProjection(record);
-  if(saved)await updateManifest([hubListingRow(record,saved.document)],state.deletedMailboxItemIds||[]);
+  if(saved)await updateManifest([hubListingRow(saved.record||record,saved.document)],state.deletedMailboxItemIds||[]);
  }
  if(repo)await writeTaskProjection(task,attachmentNames,repo);
  await mailboxJson('inbox/'+prefix+'-command.json',{schema:'avitolog.hub-command.v1',taskId:task.id,listingId:listingId||null,type:task.type,createdAt:task.createdAt,itemRepository:repo,taskPath:repo?'tasks/in/'+task.id+'.json':null},'Add hub command');
@@ -473,8 +479,8 @@ async function syncMailboxInbox(){return importMailboxFolder('inbox','importedMa
 async function syncMailboxResults(){
  if(mailboxResultSyncing||!state||!mailboxConnection?.repo||!mailboxConnection?.accessKey)return;
  mailboxResultSyncing=true;
- try{await syncMailboxInbox();await importMailboxFolder('outbox','processedMailboxResults');}
- catch{}finally{mailboxResultSyncing=false;queueMailboxResultSync(SITE_REFRESH_INTERVAL);}
+ try{await syncMailboxState(true);await syncMailboxInbox();await importMailboxFolder('outbox','processedMailboxResults');}
+ catch{}finally{mailboxResultSyncing=false;queueMailboxResultSync(resultRefreshInterval());}
 }
 const btn=(label,action,cls='')=>'<button type="button" class="btn '+cls+'" data-action="'+action+'">'+label+'</button>';
 const link=(label,href,cls='')=>'<a class="'+cls+'" '+(label===icon('back')?'aria-label="Назад" ':label===icon('close')?'aria-label="Закрыть" ':label===icon('next')?'aria-label="Вперёд" ':'')+'href="#'+esc(href)+'">'+label+'</a>';
@@ -537,7 +543,7 @@ function priceSuggestions(d){
  if(!choices.length)return '';
  return '<div class="field price-suggestions"><span>Рекомендованные цены</span><div class="price-choices">'+choices.map(([label,price])=>'<button type="button" class="price-choice '+(Number(price)===Number(d.price)?'active':'')+'" data-action="set-draft-price" data-price="'+Number(price)+'"><small>'+label+'</small><b>'+money(price)+'</b></button>').join('')+'</div></div>';
 }
-function getDraft(id){const key=id||'new',fresh={photos:[],sourcePhotos:[],imageHistory:[],title:'',raw:'',description:'',price:null,pickupMinutes:30,delivery:false,productKind:'single',condition:'used',defects:'',quantity:1,generateCards:false,cardStyle:'realistic',cardFormat:'auto',cardCount:5};if(!draft||draft.key!==key){draft={key,...(id?structuredClone(item(id)):structuredClone(state?.newDraft||fresh))};}return draft;}
+function getDraft(id){const key=id||'new',fresh={photos:[],sourcePhotos:[],imageHistory:[],title:'',raw:'',description:'',price:null,pickupMinutes:60,delivery:false,productKind:'single',condition:'used',defects:'',quantity:1,generateCards:false,cardStyle:'realistic',cardFormat:'auto',cardCount:5};if(!draft||draft.key!==key){draft={key,...(id?structuredClone(item(id)):structuredClone(state?.newDraft||fresh))};}return draft;}
 function productFields(d){const kind=d.productKind==='batch'?'batch':'single',condition=d.condition==='new'?'new':'used';return '<section class="section product-section"><h2>Параметры товара</h2><div class="segmented" role="radiogroup" aria-label="Тип товара"><label><input type="radio" name="productKind" value="single" '+(kind==='single'?'checked':'')+'><span>Товар 1</span></label><label><input type="radio" name="productKind" value="batch" '+(kind==='batch'?'checked':'')+'><span>Товар тиражный</span></label></div><div class="product-single '+(kind==='single'?'':'is-hidden')+'"><div class="field-label">Состояние</div><div class="segmented condition" role="radiogroup" aria-label="Состояние"><label><input type="radio" name="condition" value="used" '+(condition==='used'?'checked':'')+'><span>Б/у</span></label><label><input type="radio" name="condition" value="new" '+(condition==='new'?'checked':'')+'><span>Новое</span></label></div></div><div class="product-batch '+(kind==='batch'?'':'is-hidden')+'">'+field('Количество штук','<input name="quantity" type="number" min="1" step="1" inputmode="numeric" value="'+(Number(d.quantity)||1)+'">','Укажите, сколько одинаковых единиц есть в наличии.')+'</div>'+field('Дефекты и нюансы','<textarea name="defects" rows="3" placeholder="Если есть — опишите честно. Не попадёт в описание и карточки.">'+esc(d.defects||'')+'</textarea>')+'</section>';}
 function cardSettingsKey(d){return JSON.stringify([!!d.generateCards,normalizeCardStyle(d.cardStyle),normalizeCardFormat(d.cardFormat),Number(d.cardCount)||5]);}
 function cardsRegenerationChanged(d){
@@ -553,7 +559,7 @@ async function requestEditedCards(button){
  try{
  const id=draft.id,settings={generateCards:true,cardStyle:normalizeCardStyle(draft.cardStyle),cardFormat:normalizeCardFormat(draft.cardFormat),cardCount:Number(draft.cardCount)||5};
  const candidate={...structuredClone(item(id)),...settings};
- await hydrateListingMedia(candidate,true);
+ await hydrateListingMedia(candidate,true,{sources:true});
  const sources=activeCardPhotos(candidate);
  if(!sources.length||sources.some(photo=>!mediaSrc(photo)))throw Error('Дождитесь загрузки исходных фотографий');
  await commit(s=>{const saved=s.items.find(x=>x.id===id);Object.assign(saved,settings,{updatedAt:new Date().toISOString()});saved.cardGenerationSettings=cardSettingsKey(saved);saved.cardRequestKey=cardRequestKey(candidate);saved.cardRequestStatus='requested';addOutbox(s,'cards.requested',{itemId:id,item:cardInputItem(candidate),sourcePhotos:structuredClone(sources),requestId:uid(),...cardSpec(candidate),requestKey:saved.cardRequestKey,photoIds:sources.map(p=>p.id)},{action:'cards.generate',listingId:id,cards:{...cardSpec(candidate),requestKey:saved.cardRequestKey}});return s;});
@@ -570,8 +576,8 @@ function cardsHtml(d){
 
 function unusedPhotos(d){return availableImageHistory(d)[0].photos.filter(photo=>!d.photos.some(active=>samePhoto(active,photo)));}
 function allPhotosHtml(d){
- const photos=unusedPhotos(d).filter(mediaSrc);
- return '<div class="all-photos"><div class="all-photos-head">Все фотографии</div>'+(photos.length?'<div class="history-photos">'+photos.map(photo=>'<button type="button" data-action="history-add" data-history="all-images" data-photo="'+esc(photo.id)+'" aria-label="Добавить изображение в объявление"><img loading="lazy" decoding="async" src="'+esc(photo.preview||mediaSrc(photo))+'" alt="" loading="lazy" decoding="async" draggable="false"></button>').join('')+'</div>':'<p class="help">Все фотографии уже в объявлении.</p>')+'</div>';
+ const all=unusedPhotos(d),photos=all.filter(mediaSrc),missing=all.length-photos.length;
+ return '<details class="all-photos"><summary class="all-photos-head">Все фотографии<span class="meta">'+all.length+'</span></summary><div class="all-photos-body">'+(photos.length?'<div class="history-photos">'+photos.map(photo=>'<button type="button" data-action="history-add" data-history="all-images" data-photo="'+esc(photo.id)+'" aria-label="Добавить изображение в объявление"><img loading="lazy" decoding="async" src="'+esc(photo.preview||mediaSrc(photo))+'" alt="" draggable="false"></button>').join('')+'</div>':'')+(missing?'<button type="button" class="btn outline block" data-action="history-load">Загрузить фотографии из истории</button>':'')+(!photos.length&&!missing?'<p class="help">Все фотографии уже в объявлении.</p>':'')+'</div></details>';
 }
 
 function photosHtml(d){
@@ -631,34 +637,42 @@ async function hydrateItemRepository(record){
  if(!record?.itemRepository||record.itemLoaded)return record;
  if(itemHydrationPending.has(record.id))return itemHydrationPending.get(record.id);
  const pending=(async()=>{
+  // На странице объявления нужен один основной документ. Предложения и переписки
+  // уже входят в него, поэтому не создаём два дополнительных запроса к GitHub.
   const response=await repositoryRequest(record.itemRepository,'listing.json');
   if(!response.ok)throw Error('Не удалось загрузить объявление');
   const document=await decodeRepositoryJson(record.itemRepository,'listing.json',await response.json());
-  const offersResponse=await repositoryRequest(record.itemRepository,'offers.json');
-  const contactsResponse=await repositoryRequest(record.itemRepository,'contacts.json');
-  const offers=offersResponse.ok?(await decodeRepositoryJson(record.itemRepository,'offers.json',await offersResponse.json())).offers||[]:[];
-  const contacts=contactsResponse.ok?(await decodeRepositoryJson(record.itemRepository,'contacts.json',await contactsResponse.json())).contacts||[]:[];
-  const merged=normalItem({...record,...(document.item||{}),offers,chats:contacts,itemRepository:record.itemRepository,itemLoaded:true});
+  const merged=normalItem({...record,...(document.item||{}),itemRepository:record.itemRepository,itemLoaded:true});
   const index=state.items.findIndex(value=>value.id===record.id);if(index>=0){state.items[index]=merged;await saveState(state);}
   return merged;
  })().finally(()=>itemHydrationPending.delete(record.id));
  itemHydrationPending.set(record.id,pending);return pending;
 }
 
-async function hydrateListingMedia(record,full){
+async function mapWithConcurrency(values,limit,work){
+ const result=new Array(values.length),workers=Math.min(Math.max(1,limit),values.length);let next=0;
+ await Promise.all(Array.from({length:workers},async()=>{while(next<values.length){const index=next++;result[index]=await work(values[index]);}}));
+ return result;
+}
+async function hydrateListingMedia(record,full,{sources=false,history=false,limit=3}={}){
  let changed=false;
  const hydrate=async photos=>{
   if(!(photos||[]).some(photo=>!mediaSrc(photo)))return photos;
-  const listingId=record.id||record.key||'new',loaded=await readPhotoMedia(listingId,photos,{full}),resolved=await Promise.all(loaded.map(photo=>restoreSnapshotPhoto(photo,record.itemRepository||mailboxConnection?.repo)));
+  const listingId=record.id||record.key||'new',loaded=await readPhotoMedia(listingId,photos,{full}),resolved=await mapWithConcurrency(loaded,limit,async photo=>{
+   if(mediaSrc(photo))return photo;
+   try{return await restoreSnapshotPhoto(photo,record.itemRepository||mailboxConnection?.repo);}catch{return photo;}
+  });
   for(const photo of resolved)if(mediaSrc(photo))void cachePhotoMedia(listingId,photo);
   if(resolved.some((photo,index)=>mediaSrc(photo)!==mediaSrc(photos[index])))changed=true;
   return resolved;
  };
+ // Обычный просмотр не загружает исходники и прошлые серии: они нужны лишь в редакторе.
  record.photos=await hydrate(record.photos);
- record.sourcePhotos=await hydrate(record.sourcePhotos);
- if((record.imageHistory||[]).some(group=>(group.photos||[]).some(photo=>!mediaSrc(photo))))record.imageHistory=await Promise.all(record.imageHistory.map(async group=>({...group,photos:await hydrate(group.photos)})));
+ if(sources)record.sourcePhotos=await hydrate(record.sourcePhotos);
+ if(history&&(record.imageHistory||[]).some(group=>(group.photos||[]).some(photo=>!mediaSrc(photo))))record.imageHistory=await Promise.all(record.imageHistory.map(async group=>({...group,photos:await hydrate(group.photos)})));
  return changed;
 }
+
 async function hydrateVisibleMedia(){
  if(!state)return;
  const request=++mediaHydrationRevision,{parts}=route();let changed=false;
@@ -696,7 +710,7 @@ function render(){
   let swipe=null;
   const count=Number(track.dataset.count)||1,counter=document.getElementById('gallery-counter');
   const page=()=>Math.round(track.scrollLeft/(track.clientWidth||1));
-  const setIndex=index=>{galleryIndex=((index%count)+count)%count;const active=track.children[page()]?.querySelector('img');if(active?.naturalWidth&&active?.naturalHeight)track.style.height=(track.clientWidth*active.naturalHeight/active.naturalWidth)+'px';if(counter)counter.textContent=(galleryIndex+1)+' / '+count;document.querySelectorAll('.gallery-thumbs [data-index]').forEach(button=>button.classList.toggle('active',Number(button.dataset.index)===galleryIndex));};
+  const setIndex=index=>{galleryIndex=((index%count)+count)%count;if(counter)counter.textContent=(galleryIndex+1)+' / '+count;document.querySelectorAll('.gallery-thumbs [data-index]').forEach(button=>button.classList.toggle('active',Number(button.dataset.index)===galleryIndex));};
   const jump=target=>{const behavior=track.style.scrollBehavior;track.style.scrollBehavior='auto';track.scrollLeft=target*(track.clientWidth||1);requestAnimationFrame(()=>{track.style.scrollBehavior=behavior;});setIndex(target);};
   const showPage=target=>{track.scrollTo({left:target*(track.clientWidth||1),behavior:'smooth'});setIndex(target);};
   const update=()=>setIndex(page());
@@ -745,7 +759,7 @@ async function saveItem(form){
  const f=new FormData(form),isNew=draft.key==='new';
  const raw=String(f.get('raw')||'').trim(),productKind=f.get('productKind')==='batch'?'batch':'single';
  const quantity=productKind==='batch'?(Number(f.get('quantity'))||null):null;
- const data={...(isNew?{}:item(draft.id)),id:isNew?uid():draft.id,status:isNew?'queue':draft.status,title:isNew?(raw.split(/[\n.!?]/)[0]||'Новое объявление').slice(0,50):String(f.get('title')||'').trim(),raw,description:isNew?'':String(f.get('description')||''),photos:draft.photos,imageHistory:structuredClone(draft.imageHistory||[]),price:f.get('price')===''?null:Number(f.get('price')),pickupMinutes:isNew?30:Number(f.get('pickupMinutes')),delivery:!isNew&&f.has('delivery'),productKind,condition:productKind==='single'?(f.get('condition')==='new'?'new':'used'):null,defects:String(f.get('defects')||'').trim(),quantity,generateCards:f.has('generateCards'),cardStyle:normalizeCardStyle(f.get('cardStyle')),cardFormat:normalizeCardFormat(f.get('cardFormat')),cardCount:Number(f.get('cardCount'))||1,updatedAt:new Date().toISOString()};
+ const data={...(isNew?{}:item(draft.id)),id:isNew?uid():draft.id,status:isNew?'queue':draft.status,title:isNew?(raw.split(/[\n.!?]/)[0]||'Новое объявление').slice(0,50):String(f.get('title')||'').trim(),raw,description:isNew?'':String(f.get('description')||''),photos:draft.photos,imageHistory:structuredClone(draft.imageHistory||[]),price:f.get('price')===''?null:Number(f.get('price')),pickupMinutes:isNew?60:Number(f.get('pickupMinutes')),delivery:!isNew&&f.has('delivery'),productKind,condition:productKind==='single'?(f.get('condition')==='new'?'new':'used'):null,defects:String(f.get('defects')||'').trim(),quantity,generateCards:f.has('generateCards'),cardStyle:normalizeCardStyle(f.get('cardStyle')),cardFormat:normalizeCardFormat(f.get('cardFormat')),cardCount:Number(f.get('cardCount'))||1,updatedAt:new Date().toISOString()};
  const existing=isNew?null:item(draft.id);
  if(existing)data.cardGenerationSettings=existing.cardGenerationSettings||cardSettingsKey(existing);
  if(isNew)data.sourcePhotos=structuredClone(draft.photos);
@@ -799,6 +813,7 @@ root.addEventListener('click',async e=>{
  if(action==='photo-add'){document.getElementById('photo-files').click();return;}
  if(action==='photo-remove'){archiveCurrentPhotos(draft);const [removed]=draft.photos.splice(Number(b.dataset.index),1);if(removed)draft.imageHistory.unshift({id:uid(),label:'Все фотографии',kind:'library',createdAt:new Date().toISOString(),photos:[structuredClone(removed)]});refreshPhotos();return;}
  if(action==='history-add'){const group=availableImageHistory(draft).find(value=>value.id===b.dataset.history),photo=group?.photos?.find(value=>value.id===b.dataset.photo);if(!photo||!mediaSrc(photo))throw Error('Изображение из истории пока недоступно');if(draft.photos.length>=10)throw Error('Можно добавить не больше 10 фотографий');if(draft.photos.some(value=>samePhoto(value,photo))){refreshPhotos();return;}draft.photos.push(structuredClone(photo));refreshPhotos();return;}
+ if(action==='history-load'){b.disabled=true;try{await hydrateListingMedia(draft,true,{sources:true,history:true});refreshPhotos();}finally{b.disabled=false;}return;}
  if(action==='cards-toggle'){draft.generateCards=b.checked;refreshCards();queueDraftSave();return;}
  if(action.startsWith('gallery-')){
  const track=document.getElementById('gallery-track');if(!track)return;
