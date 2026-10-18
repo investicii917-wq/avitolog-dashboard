@@ -66,7 +66,13 @@ const stamp=d=>new Date(d).toLocaleString('ru-RU',{timeZone:'Europe/Moscow',day:
 const route=()=>{const [path,query='']=(location.hash.slice(1)||'/analytics').split('?');return {path,parts:path.split('/').filter(Boolean),params:new URLSearchParams(query)};};
 function go(path){if(location.hash==='#'+path)render();else location.hash=path;}
 function toast(message){clearTimeout(toastTimer);const el=document.getElementById('notifications');el.innerHTML='<div class="toast">'+esc(message)+'</div>';toastTimer=setTimeout(()=>el.innerHTML='',4200);}
-async function commit(transform){const job=commitQueue.then(async()=>{const next=await transform(state);await saveState(next);state=next;queueMailboxSync(250);queueMailboxStateSync(3000);return state;});commitQueue=job.catch(()=>{});return job;}
+function updateUploadBanner(){
+ const banner=document.getElementById('upload-banner');
+ if(!banner)return;
+ const pending=!!state?.outbox?.some(task=>!task.deliveredAt&&(task.markers?.listingId||task.payload?.itemId||task.payload?.item?.id));
+ banner.hidden=!pending;
+}
+async function commit(transform){const job=commitQueue.then(async()=>{const next=await transform(state);await saveState(next);state=next;updateUploadBanner();queueMailboxSync(250);queueMailboxStateSync(3000);return state;});commitQueue=job.catch(()=>{});return job;}
 function queueMailboxSync(delay=250){clearTimeout(mailboxSyncTimer);mailboxSyncTimer=setTimeout(()=>{void syncMailbox();},delay);}
 function queueMailboxResultSync(delay=0){clearTimeout(mailboxResultTimer);mailboxResultTimer=setTimeout(()=>{void syncMailboxResults();},delay);}
 function queueMailboxStateSync(delay=3000){clearTimeout(mailboxStateTimer);mailboxStateTimer=setTimeout(()=>{void syncMailboxState();},delay);}
@@ -499,7 +505,7 @@ function header(tab){
  const readyCount=state.items.filter(x=>x.status==='queue'||x.status==='ready'||x.status==='archived').length,publishedCount=state.items.filter(x=>x.status==='published').length,offerCount=state.items.reduce((n,x)=>n+(x.offers||[]).filter(o=>o.status==='pending').length,0);
  const tabs=[['analytics','Аналитика','Аналит.','/analytics',offerCount],['ready','Готовые','Готовые','/list/ready',readyCount],['published','Публик.','Публик.','/list/published',publishedCount]];
  return '<header class="main-head"><a class="calendar-link '+(tab==='calendar'?'active':'')+'" data-action="calendar-toggle" href="#/calendar">'+icon('calendar')+'Календарь</a><nav class="tabs" aria-label="Разделы">'+tabs.map(([key,label,short,href,count])=>link('<span class="long-label">'+label+'</span><span class="short-label">'+short+'</span><span class="count">'+count+'</span>',href,'tab '+(tab===key?'active':''))).join('')+'</nav></header>';}
-function statusIndicator(x){if(typeof x!=='string'){const pending=state?.outbox?.some(task=>!task.deliveredAt&&(task.markers?.listingId===x.id||task.payload?.itemId===x.id||task.payload?.item?.id===x.id));if(pending&&!x.syncError)return '<span class="processing-status processing">Отправляется в GitHub</span>';if(x.syncError)return '<span class="processing-status archived">Не отправлено: '+esc(x.syncError)+'</span>';}const status=typeof x==='string'?x:x.status,labels={ready:'Готово к публикации',queue:(typeof x!=='string'&&x.syncedAt?'Принято · ожидает обработки':'Ожидает обработки'),archived:'Архив'},date=status==='archived'&&x.archivedAt?'<span class="archive-date">с '+shortDate(x.archivedAt.slice(0,10))+'</span>':'';return '<span class="processing-status '+(status==='ready'?'ready':status==='archived'?'archived':'processing')+'">'+labels[status]+'</span>'+date;}
+function statusIndicator(x){if(typeof x!=='string'){const pending=state?.outbox?.some(task=>!task.deliveredAt&&(task.markers?.listingId===x.id||task.payload?.itemId===x.id||task.payload?.item?.id===x.id));if(pending&&!x.syncError)return '<span class="processing-status processing">Отправляется</span>';if(x.syncError)return '<span class="processing-status archived">Не отправлено: '+esc(x.syncError)+'</span>';}const status=typeof x==='string'?x:x.status,labels={ready:'Готово к публикации',queue:(typeof x!=='string'&&x.syncedAt?'Отправлено':'Ожидает обработки'),archived:'Архив'},date=status==='archived'&&x.archivedAt?'<span class="archive-date">с '+shortDate(x.archivedAt.slice(0,10))+'</span>':'';return '<span class="processing-status '+(status==='ready'?'ready':status==='archived'?'archived':'processing')+'">'+labels[status]+'</span>'+date;}
 function analyticsPage(){
  const published=state.items.filter(x=>x.status==='published');
  const colors=['#718fbc','#d1b16b','#b77949','#98515a','#8b755b','#6e6870'];
@@ -696,6 +702,7 @@ async function hydrateVisibleMedia(){
  }catch{}
 }
 function render(){
+ updateUploadBanner();
  if(!unlocked){connectionPage();return;}
  if(!state){root.innerHTML='<div class="loading">Открываем объявления…</div>';return;}
  const {parts,params}=route();galleryIndex=0;
@@ -775,7 +782,7 @@ async function saveItem(form){
  const event={id:uid(),type:'item.upsert',payload:normalItem(data)};
  if(isNew)clearTimeout(draftSaveTimer);
  await commit(s=>{const next=receiveEvent(s,event),saved=next.items.find(x=>x.id===data.id),{signature,previous}=isNew?prepareCardRequest(saved,null):{signature:null,previous:null};next.newDraft=null;addOutbox(next,isNew?'item.created':'item.edited',{itemId:data.id,item:saved},{...listingMarkers(saved,isNew?'listing.create':'listing.update'),cards:{...cardSpec(saved),requested:isNew&&!!signature},generateImages:isNew&&!!signature});if(signature&&signature!==previous)addOutbox(next,'cards.requested',{itemId:data.id,item:cardInputItem(saved),sourcePhotos:structuredClone(activeCardPhotos(saved)),requestId:uid(),...cardSpec(saved),requestKey:signature,photoIds:activeCardPhotos(saved).map(p=>p.id)},{action:'cards.generate',listingId:data.id,cards:{...cardSpec(saved),requestKey:signature}});return next;});
- draft=null;go(isNew?'/list/ready':'/item/'+data.id);toast(isNew?'Объявление добавлено. Отправляем в GitHub…':'Изменения сохранены. Отправляем в GitHub…');
+ draft=null;go(isNew?'/list/ready':'/item/'+data.id);toast(isNew?'Объявление добавлено. Отправляем…':'Изменения сохранены. Отправляем…');
 }
 root.addEventListener('submit',async e=>{
  e.preventDefault();const form=e.target;if(!form.checkValidity()){form.reportValidity();return;}
