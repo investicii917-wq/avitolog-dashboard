@@ -42,7 +42,7 @@ let source=fs.readFileSync(new URL('../docs/app.js',import.meta.url),'utf8').rep
 const galleryStyles=fs.readFileSync(new URL('../docs/style.css',import.meta.url),'utf8');
 check(!source.includes('track.style.height='));
 check(galleryStyles.includes('Постоянный квадратный экран карточек')&&galleryStyles.includes('Фикс: каждая карточка полностью помещается'));
-source+='\nstate=blankState();\nglobalThis.testApi={cardsHtml,mailboxManifest,applyMailboxEvent,sendMailboxEvent,restoreMailboxPhotos,connect:(c)=>{mailboxConnection=c},prepareCardRequest,decodeMailboxJson,readMailboxJson,availableImageHistory,cardInputItem};';
+source+='\nstate=blankState();\nglobalThis.testApi={cardsHtml,mailboxManifest,applyMailboxEvent,sendMailboxEvent,restoreMailboxPhotos,connect:(c)=>{mailboxConnection=c},prepareCardRequest,decodeMailboxJson,readMailboxJson,availableImageHistory,cardInputItem,setItems:v=>{state.items=v},requestSeries:async d=>{draft=d;await requestEditedCards({disabled:false});return state;}};';
 vm.runInContext(source,context);
 const api=context.testApi;
 const html=api.cardsHtml(base);
@@ -89,6 +89,16 @@ const third=second;
 check(third.items[0].cardStyle==='designer'&&third.items[0].cardFormat==='landscape'&&third.items[0].photos[0].mediaPath&&third.items[0].imageHistory[0].photos[0].mediaPath);
 const cleanManifest=JSON.parse(api.mailboxManifest({...event,payload:{...event.payload,item:{...base,sourcePhotos:base.photos}}},['original.png']));
 check(!JSON.stringify(cleanManifest).includes('data:image'));
+// Regeneration must queue from originals already stored remotely. Requiring a
+// second browser download here prevents cards from ever reaching the queue.
+const remoteOriginal={id:'src',path:'images/originals/a.png',mediaPath:'images/originals/a.png',name:'original.png',type:'image/png'};
+const remoteOnly={...structuredClone(regenerated),id:'remote-only',sourcePhotos:[remoteOriginal],imageHistory:[{id:'original-set',kind:'source',photos:[remoteOriginal]}],cardGenerationSettings:JSON.stringify([true,'designer','landscape',3]),cardCount:3};
+api.setItems([remoteOnly]);
+const regeneratedDraft={...structuredClone(remoteOnly),cardCount:4};
+const queued=await api.requestSeries(regeneratedDraft);
+check(queued.items[0].cardRequestStatus==='requested');
+check(queued.outbox.at(-1).type==='cards.requested');
+check(queued.outbox.at(-1).payload.sourcePhotos[0].path==='images/originals/a.png');
   const createdManifest=JSON.parse(api.mailboxManifest({...event,type:'item.created',payload:{item:{...base,imageHistory:[{id:'history',photos:base.photos}]}}},['original.png']));
   check(!JSON.stringify(createdManifest).includes('data:image'));
 context.fetch=async(url,options)=>({ok:true,text:async()=>JSON.stringify({big:true,text:'x'.repeat(1100000)})});

@@ -29,6 +29,7 @@ const item=id=>state.items.find(x=>x.id===id);
 const mediaSrc=photo=>photo?.src||photo?.preview||'';
 const samePhoto=(a,b)=>!!((a.id&&b.id&&a.id===b.id)||(a.path&&b.path&&a.path===b.path)||(a.file&&b.file&&a.file===b.file)||([a.src,a.preview].filter(Boolean).some(value=>value===b.src||value===b.preview)));
 const activeCardPhotos=record=>cardSourcePhotos(record);
+const cardSourceAvailable=photo=>!!(mediaSrc(photo)||String(photo?.path||photo?.mediaPath||'').startsWith('images/originals/'));
 const photoIds=photos=>(photos||[]).map(photo=>photo.id).join('|');
 const samePhotos=(left,right)=>photoIds(left)===photoIds(right);
 function rememberPhotoSet(record,photos,label,kind){
@@ -583,9 +584,10 @@ async function requestEditedCards(button){
  try{
  const id=draft.id,settings={generateCards:true,cardStyle:normalizeCardStyle(draft.cardStyle),cardFormat:normalizeCardFormat(draft.cardFormat),cardCount:Number(draft.cardCount)||5};
  const candidate={...structuredClone(item(id)),...settings};
- await hydrateListingMedia(candidate,true,{sources:true});
  const sources=activeCardPhotos(candidate);
- if(!sources.length||sources.some(photo=>!mediaSrc(photo)))throw Error('Дождитесь загрузки исходных фотографий');
+ // Original files are already in the listing repository. A new series can be
+ // queued from those references without downloading every original to the phone.
+ if(!sources.length||sources.some(photo=>!cardSourceAvailable(photo)))throw Error('Не найдены исходные фотографии для новой серии');
  await commit(s=>{const saved=s.items.find(x=>x.id===id);Object.assign(saved,settings,{updatedAt:new Date().toISOString()});saved.cardGenerationSettings=cardSettingsKey(saved);saved.cardRequestKey=cardRequestKey(candidate);saved.cardRequestStatus='requested';addOutbox(s,'cards.requested',{itemId:id,item:cardInputItem(candidate),sourcePhotos:structuredClone(sources),requestId:uid(),...cardSpec(candidate),requestKey:saved.cardRequestKey,photoIds:sources.map(p=>p.id)},{action:'cards.generate',listingId:id,cards:{...cardSpec(candidate),requestKey:saved.cardRequestKey}});return s;});
  refreshRegenerationButton();toast('Запрос на генерацию добавлен в очередь');
  }finally{button.disabled=false;}
