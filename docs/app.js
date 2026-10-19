@@ -1,6 +1,6 @@
 import {mergeManifest,retainPendingState} from './hub-sync.js?v=1';
 import {installPhotoSort} from './photo-sort.js?v=2';
-import {CARD_STYLES,normalizeCardStyle,normalizeCardFormat,cardSpec,cardRequestKey,cardResultProblem} from './cards.js?v=4';
+import {CARD_STYLES,normalizeCardStyle,normalizeCardFormat,cardSpec,cardRequestKey,cardResultProblem,cardSourcePhotos} from './cards.js?v=5';
 
 import {readState,saveState,readPhotoMedia,cachePhotoMedia} from './data.js?v=11';
 import {uid,todayKey,normalItem,receiveEvent,addSlot,addBooking,freeTimes,dayLoad,minutes,blankState} from './model.js?v=17';
@@ -28,7 +28,7 @@ const statusName={queue:'Ожидает обработки',ready:'Готово 
 const item=id=>state.items.find(x=>x.id===id);
 const mediaSrc=photo=>photo?.src||photo?.preview||'';
 const samePhoto=(a,b)=>!!((a.id&&b.id&&a.id===b.id)||(a.path&&b.path&&a.path===b.path)||(a.file&&b.file&&a.file===b.file)||([a.src,a.preview].filter(Boolean).some(value=>value===b.src||value===b.preview)));
-const activeCardPhotos=record=>record?.sourcePhotos?.length?record.sourcePhotos:(record?.photos||[]);
+const activeCardPhotos=record=>cardSourcePhotos(record);
 const photoIds=photos=>(photos||[]).map(photo=>photo.id).join('|');
 const samePhotos=(left,right)=>photoIds(left)===photoIds(right);
 function rememberPhotoSet(record,photos,label,kind){
@@ -431,6 +431,7 @@ function mergeRemoteItem(s,source,photos){
  const resolvedPhotos=photos?.length?photos:(source.photos||old.photos||[]);
  const next=normalItem({...old,...source,photos:resolvedPhotos,sourcePhotos:source.sourcePhotos?.length?(photos?.length?structuredClone(photos):source.sourcePhotos):(old.sourcePhotos||[])});
  next.imageHistory=[...(next.imageHistory||[]),...(old.imageHistory||[]).filter(group=>!(next.imageHistory||[]).some(value=>value.id===group.id))];rememberPhotoSet(next,old.photos,'Все фотографии','library');archiveCurrentPhotos(next);if(index>=0)s.items[index]=next;else s.items.unshift(next);
+ next.sourcePhotos=structuredClone(activeCardPhotos(next));
 }
 function applyMailboxEvent(s,event,photos=[]){
  const p=event?.payload||{},remote=p.item||(event?.type==='item.upsert'?p:null);
@@ -438,7 +439,7 @@ function applyMailboxEvent(s,event,photos=[]){
   const record=s.items.find(x=>x.id===p.itemId),problem=cardResultProblem(record,{...p,photos:photos.length?photos:p.photos});
   if(problem)return;
   if(!photos.length||photos.some(p=>!p.src))throw Error('Файлы карточек ещё не получены');
-  if(!record.sourcePhotos?.length)record.sourcePhotos=structuredClone(record.photos||[]);
+  record.sourcePhotos=structuredClone(activeCardPhotos(record));
   rememberImageSet(record,record.generatedCards?'Предыдущая серия карточек':'Исходные фотографии',record.generatedCards?'generated':'source');
   record.photos=photos.length?photos:p.photos;record.generatedCards={style:p.style,aspectRatio:p.aspectRatio,requestKey:p.requestKey,quality:p.quality||'review-required'};
   archiveCurrentPhotos(record);record.cardRequestStatus='completed';record.updatedAt=event.createdAt;return;
@@ -777,7 +778,7 @@ async function saveItem(form){
  const existing=isNew?null:item(draft.id);
  if(existing)data.cardGenerationSettings=existing.cardGenerationSettings||cardSettingsKey(existing);
  if(isNew){data.sourcePhotos=structuredClone(draft.photos);data.syncState='pending';delete data.syncError;delete data.syncFailedAt;}
- else data.sourcePhotos=structuredClone(draft.sourcePhotos||existing?.sourcePhotos||[]);
+ else data.sourcePhotos=structuredClone(activeCardPhotos(draft));
    if(data.pickupMinutes<30||data.pickupMinutes>480)throw Error('Укажите время получения от 30 до 480 минут');
  const event={id:uid(),type:'item.upsert',payload:normalItem(data)};
  if(isNew)clearTimeout(draftSaveTimer);

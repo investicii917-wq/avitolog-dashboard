@@ -7,6 +7,16 @@ export const CARD_STYLES = Object.freeze({
 export const normalizeCardStyle = value => Object.hasOwn(CARD_STYLES,value) ? value : 'realistic';
 export const normalizeCardFormat = value => ['landscape','portrait'].includes(value) ? value : 'auto';
 export const normalizeCardCount = value => Number.isInteger(Number(value)) && Number(value)>=1 && Number(value)<=10 ? Number(value) : 1;
+const sourceKey=photo=>photo?.id||photo?.path||photo?.mediaPath||photo?.file||photo?.src||photo?.preview||null;
+const generatedPhoto=photo=>String(photo?.path||photo?.mediaPath||'').startsWith('images/generated/');
+export function cardSourcePhotos(record) {
+ const history=Array.isArray(record?.imageHistory)?record.imageHistory:[];
+ const sourceGroups=history.filter(group=>group?.kind==='source').flatMap(group=>group.photos||[]);
+ const originalPaths=[...sourceGroups,...(record?.sourcePhotos||[]),...(record?.photos||[]),...history.flatMap(group=>group.photos||[])].filter(photo=>String(photo?.path||photo?.mediaPath||'').startsWith('images/originals/'));
+ const candidates=originalPaths.length?originalPaths:[...sourceGroups,...(record?.sourcePhotos||[]).filter(photo=>!generatedPhoto(photo))];
+ const seen=new Set();
+ return candidates.filter(photo=>{const key=sourceKey(photo);if(!key||seen.has(key))return false;seen.add(key);return true;});
+}
 export function cardSpec(record) {
  const format=normalizeCardFormat(record.cardFormat),requested=!!record.generateCards;
  const style=requested?normalizeCardStyle(record.cardStyle):null;
@@ -25,7 +35,7 @@ export function cardRequestKey(record) {
  return JSON.stringify({cards:cardSpec(record),title:record.title||'',raw:record.raw||'',
   description:record.description||'',price:record.price??null,condition:record.condition??null,
   productKind:record.productKind||'single',quantity:record.quantity??null,
-  photos:((record.sourcePhotos?.length?record.sourcePhotos:record.photos)||[]).map(p=>({id:p.id,file:p.file||null,name:p.name||'',revision:p.sha||p.updatedAt||null}))});
+  photos:cardSourcePhotos(record).map(p=>({id:p.id,file:p.file||null,name:p.name||'',revision:p.sha||p.updatedAt||null}))});
 }
 export function cardResultProblem(record, result) {
  if(!record||!record.generateCards)return 'Карточки больше не запрошены';
