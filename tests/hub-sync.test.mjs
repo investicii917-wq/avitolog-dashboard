@@ -27,16 +27,16 @@ function harness(){
  const files=new Map(),requests=[],active=new Set();
  const root={addEventListener(){},innerHTML:''};
  const context=vm.createContext({...hub,...cards,...model,...calendar,...repo,console,structuredClone,crypto:webcrypto,TextEncoder,TextDecoder,AbortController,URLSearchParams,Blob,
- document:{getElementById:()=>root},window:{addEventListener(){}},location:{hash:''},setTimeout:()=>0,clearTimeout(){},
+ document:{getElementById:()=>root},window:{addEventListener(){}},location:{hash:''},setTimeout:()=>0,clearTimeout(){},setInterval:()=>0,clearInterval(){},
  btoa:s=>Buffer.from(s,'binary').toString('base64'),atob:s=>Buffer.from(s,'base64').toString('binary'),
  saveState:async()=>{},readPhotoMedia:async(id,photos)=>photos,cachePhotoMedia:async()=>{}});
  const response=(status,value)=>({ok:status>=200&&status<300,status,json:async()=>value});
- let version=0,conflict=false;
+ let version=0,conflict=false,dropNextCommandConfirmation=false;
  context.fetch=async(url,options={})=>{
   const route=new URL(url).pathname,method=options.method||'GET';requests.push({route,method});
   if(route==='/user/repos'){const body=JSON.parse(options.body);files.set('/repos/owner/'+body.name+'/contents',{sha:'initial',content:'',encoding:'base64'});return response(201,{});}
   if(method==='GET'&&route.endsWith('/contents')&&[...files.keys()].some(path=>path.startsWith(route+'/')))return response(200,[]);
-  if(method==='GET'){const entry=files.get(route);return response(entry?200:404,entry||{});}
+  if(method==='GET'){const entry=files.get(route);if(dropNextCommandConfirmation&&entry&&route.endsWith('-command.json')){dropNextCommandConfirmation=false;return response(503,{});}return response(entry?200:404,entry||{});}
   const repository=route.split('/contents/')[0];
   if(active.has(repository))return response(409,{});
   active.add(repository);await new Promise(resolve=>setImmediate(resolve));
@@ -54,7 +54,7 @@ function harness(){
  let source=fs.readFileSync(new URL('../docs/app.js',import.meta.url),'utf8').replace(/^import .*;\r?\n/gm,'').replace(/\nboot\(\);\s*$/,'');
  source+='\n globalThis.api={syncListingProjection,sendMailboxEvent,syncRepositoryProjection,loadHubState,updateManifest,updateCalendarProjection,setup:s=>{state=s;mailboxConnection={repo:"owner/hub",accessKey:"test"}},state:()=>state};';
  vm.runInContext(source,context);
- return {api:context.api,files,requests};
+ return {api:context.api,files,requests,dropNextCommandConfirmation:()=>{dropNextCommandConfirmation=true;}};
 }
 test('actual dispatch stores media and listing before command, merges conflict, survives reload',async()=>{
  const h=harness(),record=model.normalItem({id:'new-id',title:'Test',status:'queue',updatedAt:'2026-10-15T12:00:00Z',photos:[1,2,3].map(id=>({id:String(id),src:'data:image/png;base64,YQ==',type:'image/png'}))});
@@ -85,6 +85,15 @@ for(const variant of [{productKind:'single',condition:'new'},{productKind:'singl
  assert.equal(commands.length,1,'retry must not duplicate the command');
  const lastRead=h.requests.findLast(request=>request.method==='GET'&&request.route.endsWith('-command.json'));
  assert.ok(lastRead,'delivery must be read back from GitHub');
+});
+
+test('retry confirms a command that reached GitHub before the network dropped',async()=>{
+ const h=harness(),record=model.normalItem({id:'recovered',status:'queue',title:'Product',photos:[{id:'photo',src:'data:image/png;base64,YQ==',type:'image/png'}]}),task={id:'recovered-task',type:'item.created',createdAt:'2026-10-18T12:00:00Z',payload:{itemId:record.id,item:record},markers:{listingId:record.id}};
+ h.api.setup({...model.blankState(),items:[record],outbox:[task]});h.dropNextCommandConfirmation();
+ await assert.rejects(()=>h.api.sendMailboxEvent(task));
+ const before=h.requests.filter(request=>request.method==='PUT'&&request.route.endsWith('-command.json')).length;assert.equal(before,1);
+ await h.api.sendMailboxEvent(task);
+ const after=h.requests.filter(request=>request.method==='PUT'&&request.route.endsWith('-command.json')).length;assert.equal(after,1,'existing command must be confirmed without a second write');
 });
 
 test('empty device cannot overwrite full listings or registry',async()=>{

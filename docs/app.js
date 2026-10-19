@@ -69,7 +69,10 @@ function toast(message){clearTimeout(toastTimer);const el=document.getElementByI
 function updateUploadBanner(){
  const banner=document.getElementById('upload-banner');
  if(!banner)return;
- const pending=!!state?.outbox?.some(task=>!task.deliveredAt&&(task.markers?.listingId||task.payload?.itemId||task.payload?.item?.id));
+ const pendingTasks=(state?.outbox||[]).filter(task=>!task.deliveredAt&&(task.markers?.listingId||task.payload?.itemId||task.payload?.item?.id));
+ const pending=!!pendingTasks.length;
+ const retrying=pendingTasks.some(task=>{const id=task.markers?.listingId||task.payload?.itemId||task.payload?.item?.id;return state?.items?.find(item=>item.id===id)?.syncError;});
+ banner.textContent=retrying?'Связь прервалась — повторяем отправку':'Объявление загружается — не выходите';
  banner.hidden=!pending;
 }
 async function commit(transform){const job=commitQueue.then(async()=>{const next=await transform(state);await saveState(next);state=next;updateUploadBanner();queueMailboxSync(250);queueMailboxStateSync(3000);return state;});commitQueue=job.catch(()=>{});return job;}
@@ -353,8 +356,19 @@ async function syncMailboxState(loadOnly=false){
  catch{mailboxStateFailed=true;queueMailboxStateSync(5000);}
  finally{mailboxStateSyncing=false;}
 }
+async function commandAlreadyAccepted(task,commandPath,repo){
+ const confirmation=await mailboxRequest(commandPath);
+ if(confirmation.status===404)return false;
+ if(!confirmation.ok)throw Error('Не удалось проверить отправленную команду: HTTP '+confirmation.status);
+ const delivered=await decodeMailboxJson(commandPath,await confirmation.json());
+ if(delivered.taskId!==task.id||delivered.itemRepository!==repo)throw Error('Подтверждение команды не совпадает с отправленным объявлением');
+ return true;
+}
 async function sendMailboxEvent(task){
- const listingId=task.markers?.listingId||task.payload?.itemId||task.payload?.item?.id,record=item(listingId)||task.payload?.item||null,repo=record?await ensureItemRepository(record):null,prefix=String(task.createdAt||new Date().toISOString()).replace(/\D/g,'').slice(0,14)+'-'+String(task.id).replace(/[^a-zA-Z0-9-]/g,''),photos=(task.type==='cards.requested'?task.payload?.sourcePhotos:(['item.created','item.edited'].includes(task.type)?task.payload?.item?.photos:[]))||[],attachmentNames=(photos||[]).map(()=>null);
+ const listingId=task.markers?.listingId||task.payload?.itemId||task.payload?.item?.id,record=item(listingId)||task.payload?.item||null,repo=record?await ensureItemRepository(record):null,prefix=String(task.createdAt||new Date().toISOString()).replace(/\D/g,'').slice(0,14)+'-'+String(task.id).replace(/[^a-zA-Z0-9-]/g,''),commandPath='inbox/'+prefix+'-command.json',photos=(task.type==='cards.requested'?task.payload?.sourcePhotos:(['item.created','item.edited'].includes(task.type)?task.payload?.item?.photos:[]))||[],attachmentNames=(photos||[]).map(()=>null);
+ // Сеть могла оборваться после записи команды, но до локального подтверждения. В этом
+ // случае команда уже есть в GitHub: не отправляем файлы заново и считаем её доставленной.
+ if(await commandAlreadyAccepted(task,commandPath,repo)){queueMailboxStateSync();return;}
  for(let index=0;index<photos.length;index++){
   const photo=photos[index],encoded=dataUriBase64(photo.src||photo.preview),extension=fileExtension(photo);if(!encoded)continue;
   const name=prefix+'-'+(index+1)+'-photo.'+extension;
@@ -366,12 +380,8 @@ async function sendMailboxEvent(task){
   if(saved)await updateManifest([hubListingRow(saved.record||record,saved.document)],state.deletedMailboxItemIds||[]);
  }
  if(repo)await writeTaskProjection(task,attachmentNames,repo);
- const commandPath='inbox/'+prefix+'-command.json';
  await mailboxJson(commandPath,{schema:'avitolog.hub-command.v1',taskId:task.id,listingId:listingId||null,type:task.type,createdAt:task.createdAt,itemRepository:repo,taskPath:repo?'tasks/in/'+task.id+'.json':null},'Add hub command');
- const confirmation=await mailboxRequest(commandPath);
- if(!confirmation.ok)throw Error('Не подтверждена запись команды: HTTP '+confirmation.status);
- const delivered=await decodeMailboxJson(commandPath,await confirmation.json());
- if(delivered.taskId!==task.id||delivered.itemRepository!==repo)throw Error('Подтверждение команды не совпадает с отправленным объявлением');
+ if(!await commandAlreadyAccepted(task,commandPath,repo))throw Error('Не подтверждена запись команды. Отправка будет повторена.');
  // Other listings are synced separately; their failures must not undo this delivery.
  queueMailboxStateSync();
 }
@@ -506,7 +516,7 @@ function header(tab){
  const readyCount=state.items.filter(x=>x.status==='queue'||x.status==='ready'||x.status==='archived').length,publishedCount=state.items.filter(x=>x.status==='published').length,offerCount=state.items.reduce((n,x)=>n+(x.offers||[]).filter(o=>o.status==='pending').length,0);
  const tabs=[['analytics','Аналитика','Аналит.','/analytics',offerCount],['ready','Готовые','Готовые','/list/ready',readyCount],['published','Публик.','Публик.','/list/published',publishedCount]];
  return '<header class="main-head"><a class="calendar-link '+(tab==='calendar'?'active':'')+'" data-action="calendar-toggle" href="#/calendar">'+icon('calendar')+'Календарь</a><nav class="tabs" aria-label="Разделы">'+tabs.map(([key,label,short,href,count])=>link('<span class="long-label">'+label+'</span><span class="short-label">'+short+'</span><span class="count">'+count+'</span>',href,'tab '+(tab===key?'active':''))).join('')+'</nav></header>';}
-function statusIndicator(x){if(typeof x!=='string'){const pending=state?.outbox?.some(task=>!task.deliveredAt&&(task.markers?.listingId===x.id||task.payload?.itemId===x.id||task.payload?.item?.id===x.id));if(pending&&!x.syncError)return '<span class="processing-status processing">Отправляется</span>';if(x.syncError)return '<span class="processing-status archived">Не отправлено: '+esc(x.syncError)+'</span>';}const status=typeof x==='string'?x:x.status,labels={ready:'Готово к публикации',queue:(typeof x!=='string'&&x.syncedAt?'Отправлено':'Ожидает обработки'),archived:'Архив'},date=status==='archived'&&x.archivedAt?'<span class="archive-date">с '+shortDate(x.archivedAt.slice(0,10))+'</span>':'';return '<span class="processing-status '+(status==='ready'?'ready':status==='archived'?'archived':'processing')+'">'+labels[status]+'</span>'+date;}
+function statusIndicator(x){if(typeof x!=='string'){const pending=state?.outbox?.some(task=>!task.deliveredAt&&(task.markers?.listingId===x.id||task.payload?.itemId===x.id||task.payload?.item?.id===x.id));if(pending)return '<span class="processing-status processing">'+(x.syncError?'Повторяем отправку':'Отправляется')+'</span>';if(x.syncError)return '<span class="processing-status archived">Не удалось отправить: '+esc(x.syncError)+'</span>';}const status=typeof x==='string'?x:x.status,labels={ready:'Готово к публикации',queue:(typeof x!=='string'&&x.syncedAt?'Отправлено':'Ожидает обработки'),archived:'Архив'},date=status==='archived'&&x.archivedAt?'<span class="archive-date">с '+shortDate(x.archivedAt.slice(0,10))+'</span>':'';return '<span class="processing-status '+(status==='ready'?'ready':status==='archived'?'archived':'processing')+'">'+labels[status]+'</span>'+date;}
 function analyticsPage(){
  const published=state.items.filter(x=>x.status==='published');
  const colors=['#718fbc','#d1b16b','#b77949','#98515a','#8b755b','#6e6870'];
@@ -941,4 +951,5 @@ async function boot(){
 }
 if(typeof window!=='undefined'&&window.addEventListener)window.addEventListener('online',()=>{queueMailboxSync();queueMailboxStateSync();queueMailboxResultSync();});
 if(typeof document!=='undefined'&&document.addEventListener)document.addEventListener('visibilitychange',()=>{if(!document.hidden){queueMailboxSync();queueMailboxStateSync();queueMailboxResultSync();}});
+if(typeof setInterval==='function')setInterval(()=>{if(state?.outbox?.some(task=>!task.deliveredAt))queueMailboxSync();},15000);
 boot();
