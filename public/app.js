@@ -686,20 +686,21 @@ function bookingPage(x,offerId,params){
 function missing(){return page('Страница не найдена','/list/queue',section('<p>Объявление или интервал уже недоступны.</p>'));}
 let mediaHydrationRevision=0;
 const itemHydrationPending=new Map();
-async function hydrateItemRepository(record){
- if(!record?.itemRepository||record.itemLoaded)return record;
- if(itemHydrationPending.has(record.id))return itemHydrationPending.get(record.id);
+async function hydrateItemRepository(record,{refresh=false}={}){
+ if(!record?.itemRepository||(record.itemLoaded&&!refresh))return record;
+ const pendingKey=record.id+(refresh?':refresh':'');
+ if(itemHydrationPending.has(pendingKey))return itemHydrationPending.get(pendingKey);
  const pending=(async()=>{
   // На странице объявления нужен один основной документ. Предложения и переписки
   // уже входят в него, поэтому не создаём два дополнительных запроса к GitHub.
   const response=await repositoryRequest(record.itemRepository,'listing.json');
   if(!response.ok)throw Error('Не удалось загрузить объявление');
   const document=await decodeRepositoryJson(record.itemRepository,'listing.json',await response.json());
-  const merged=normalItem({...record,...(document.item||{}),itemRepository:record.itemRepository,itemLoaded:true});
+  const merged=normalItem({...record,...(document.item||{}),itemRepository:record.itemRepository,itemLoaded:true,historyCheckedAt:new Date().toISOString()});
   const index=state.items.findIndex(value=>value.id===record.id);if(index>=0){state.items[index]=merged;await saveState(state);}
   return merged;
- })().finally(()=>itemHydrationPending.delete(record.id));
- itemHydrationPending.set(record.id,pending);return pending;
+ })().finally(()=>itemHydrationPending.delete(pendingKey));
+ itemHydrationPending.set(pendingKey,pending);return pending;
 }
 
 async function mapWithConcurrency(values,limit,work){
@@ -755,7 +756,8 @@ function render(){
  else if(parts[0]==='slot')root.innerHTML=parts[1]==='new'?slotEditor(params):schedulePage(parts[1]);
  else if(parts[0]==='item'){
  const x=item(parts[1]);
- if(x?.itemRepository&&!x.itemLoaded){root.innerHTML='<div class="loading">Загружаем объявление…</div>';void hydrateItemRepository(x).then(()=>render()).catch(error=>{root.innerHTML=page('Не удалось загрузить объявление','/list/ready',section('<p>'+esc(error.message)+'</p>'));});return;}
+ const needsHistory=parts[2]==='edit'&&!x?.historyCheckedAt;
+ if(x?.itemRepository&&(!x.itemLoaded||needsHistory)){root.innerHTML='<div class="loading">Загружаем объявление…</div>';void hydrateItemRepository(x,{refresh:needsHistory}).then(()=>render()).catch(error=>{root.innerHTML=page('Не удалось загрузить объявление','/list/ready',section('<p>'+esc(error.message)+'</p>'));});return;}
  root.innerHTML=!x?missing():parts[2]==='edit'?editPage(x.id):parts[2]==='comments'?commentsPage(x):parts[2]==='cards-comment'?cardCommentsPage(x):parts[2]==='offers'?offersPage(x):parts[2]==='writers'?writersPage(x):parts[2]==='chat'?chatPage(x,parts[3]):parts[2]==='book'?bookingPage(x,parts[3],params):detailPage(x);
  }else root.innerHTML=listPage(parts[1]||'queue');
  }catch(e){root.innerHTML=page('Не удалось открыть страницу','/list/queue',section('<p>'+esc(e.message)+'</p>'));}
