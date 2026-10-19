@@ -33,7 +33,8 @@ export function mediaDocument(item){
  for(const photo of item.sourcePhotos||[])add(photo,'source',item.createdAt);
  for(const group of item.imageHistory||[])for(const photo of group.photos||[])add(photo,group.kind||'history',group.createdAt);
  for(const photo of item.photos||[])add(photo,item.generatedCards?'generated':'source',item.updatedAt);
- return {schemaVersion:REPOSITORY_SCHEMA,listingId:item.id,revision:item.revision||0,updatedAt:item.updatedAt||item.createdAt||new Date().toISOString(),activePhotoIds:(item.photos||[]).map(photo=>photo.id),catalog};
+ for(const photo of item.contextPhotos||[])add(photo,'context',item.updatedAt);
+ return {schemaVersion:REPOSITORY_SCHEMA,listingId:item.id,revision:item.revision||0,updatedAt:item.updatedAt||item.createdAt||new Date().toISOString(),activePhotoIds:(item.photos||[]).map(photo=>photo.id),contextPhotoIds:(item.contextPhotos||[]).map(photo=>photo.id),catalog};
 }
 
 export function taskDocument({taskId,listingId,baseRevision,action,input,createdAt}){

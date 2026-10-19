@@ -3,9 +3,9 @@ import {installPhotoSort} from './photo-sort.js?v=2';
 import {CARD_STYLES,normalizeCardStyle,normalizeCardFormat,cardSpec,cardRequestKey,cardResultProblem,cardSourcePhotos} from './cards.js?v=5';
 
 import {readState,saveState,readPhotoMedia,cachePhotoMedia} from './data.js?v=11';
-import {uid,todayKey,normalItem,receiveEvent,addSlot,addBooking,freeTimes,dayLoad,minutes,blankState} from './model.js?v=17';
+import {uid,todayKey,normalItem,receiveEvent,addSlot,addBooking,freeTimes,dayLoad,minutes,blankState} from './model.js?v=18';
 import {calendarDocument,calendarChanged,mergeCalendar,CALENDAR_SCHEMA_VERSION} from './calendar.js?v=2';
-import {REPOSITORY_SCHEMA,PAGE_SIZE,indexPath,indexRow,listingPaths,mediaDocument,splitPages,taskDocument} from './repository-v2.js?v=2';
+import {REPOSITORY_SCHEMA,PAGE_SIZE,indexPath,indexRow,listingPaths,mediaDocument,splitPages,taskDocument} from './repository-v2.js?v=3';
 const root=document.getElementById('app');
 const CONNECTION_KEY='avitolog-mailbox-connection-v1';
 let state,unlocked=false,mailboxConnection=null,draft=null,galleryIndex=0,toastTimer,photoBusy=false,photoSortSuppressClick=false,commitQueue=Promise.resolve(),mailboxSyncing=false,mailboxSyncTimer,mailboxResultSyncing=false,mailboxResultTimer,mailboxStateTimer,mailboxStateSyncing=false,mailboxStateFailed=false,calendarReturnPath='/analytics',repositoryProjectionHash='';
@@ -17,7 +17,7 @@ const icons={
  next:'<path d="m9 5 7 7-7 7"/>',edit:'<path d="m15 4 5 5M4 20l5-1L20 8a2 2 0 0 0-5-5L4 14z"/>',
  comment:'<path d="M20 14a3 3 0 0 1-3 3H9l-5 4V6a3 3 0 0 1 3-3h10a3 3 0 0 1 3 3zM8 8h8M8 12h5"/>',
  eye:'<path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>',
- heart:'<path d="M12 20 4 12a5 5 0 0 1 8-6 5 5 0 0 1 8 6z"/>',clock:'<circle cx="12" cy="12" r="9"/><path d="M12 6v6l4 2"/>',
+ heart:'<path d="M12 20 4 12a5 5 0 0 1 8-6 5 5 0 0 1 8 6z"/>',clock:'<circle cx="12" cy="12" r="9"/><path d="M12 6v6l4 2"/>',refresh:'<path d="M20 11a8 8 0 1 0 2 5"/><path d="M20 4v7h-7"/>',
  box:'<path d="m3 7 9-4 9 4v11l-9 4-9-4zM3 7l9 4 9-4M12 11v11M7 5l9 4"/>'
 };
 const icon=name=>'<svg viewBox="0 0 24 24" aria-hidden="true">'+(icons[name]||icons.box)+'</svg>';
@@ -58,7 +58,7 @@ function availableImageHistory(record){
 function cardInputItem(record){
  const copy=structuredClone(record);
  copy.photos=structuredClone(activeCardPhotos(record));
- delete copy.sourcePhotos;delete copy.imageHistory;delete copy.defects;
+ delete copy.sourcePhotos;delete copy.imageHistory;delete copy.defects;delete copy.context;delete copy.contextPhotos;
  return copy;
 }
 const shortDate=d=>new Date(d+'T12:00:00').toLocaleDateString('ru-RU',{day:'numeric',month:'long'});
@@ -104,15 +104,20 @@ function cardJob(task,payload,photos){
   source:{photoIds:photos.map(photo=>photo.id),attachments:photos.map(photo=>({photoId:photo.id,file:photo.file||null,type:photo.type})),factsSource:'listing.description-only'},
   resultRequirements:{styleCode:cards.style,exactCount:cards.count,coverAspectRatio:'1:1',oneAspectRatioForRemainingCards:true,echoRequestKey:payload.requestKey,returnPhotoIds:true}};
 }
+function taskAttachmentGroups(task){
+ const payload=task.payload||{},itemPayload=payload.item||{};
+ return {photos:Array.isArray(task.type==='cards.requested'?payload.sourcePhotos:itemPayload.photos)?(task.type==='cards.requested'?payload.sourcePhotos:itemPayload.photos):[],contextPhotos:['item.created','item.edited'].includes(task.type)&&Array.isArray(itemPayload.contextPhotos)?itemPayload.contextPhotos:[]};
+}
 function mailboxManifest(task,attachmentNames){
- const payload=structuredClone(task.payload||{}),photos=task.type==='cards.requested'?payload?.sourcePhotos:payload?.item?.photos;
- const manifestPhotos=Array.isArray(photos)?photos.map((photo,index)=>({id:photo.id,name:photo.name||('photo-'+(index+1)),type:photo.type||'image/jpeg',file:attachmentNames[index]||null})):[];
+ const payload=structuredClone(task.payload||{}),{photos,contextPhotos}=taskAttachmentGroups({type:task.type,payload});
+ const manifestPhotos=photos.map((photo,index)=>({id:photo.id,name:photo.name||('photo-'+(index+1)),type:photo.type||'image/jpeg',file:attachmentNames[index]||null}));
+ const manifestContextPhotos=contextPhotos.map((photo,index)=>({id:photo.id,name:photo.name||('context-'+(index+1)),type:photo.type||'image/jpeg',file:attachmentNames[manifestPhotos.length+index]||null}));
  if(task.type==='cards.requested'){
   payload.sourcePhotos=manifestPhotos;if(payload.item)payload.item.photos=manifestPhotos;
   payload.cardJob=cardJob(task,payload,manifestPhotos);
  }
- else if(Array.isArray(photos))payload.item.photos=manifestPhotos;
-  if(payload.item){delete payload.item.sourcePhotos;delete payload.item.imageHistory;}
+ else if(payload.item){payload.item.photos=manifestPhotos;payload.item.contextPhotos=manifestContextPhotos;}
+ if(payload.item){delete payload.item.sourcePhotos;delete payload.item.imageHistory;}
  return JSON.stringify({schema:'avitolog.mailbox.v1',id:task.id,type:task.type,createdAt:task.createdAt,payload,markers:task.markers||{},attachments:attachmentNames},null,2);
 }
 function putMailboxFile(path,content,message,options={}){return queueRepositoryWrite(mailboxConnection.repo,()=>putMailboxFileNow(path,content,message,options));}
@@ -256,6 +261,7 @@ async function itemDocument(record,repo){
  copy.photos=await Promise.all((copy.photos||[]).map(photo=>itemSnapshotPhoto(record,photo,record.generatedCards?'generated':'originals',repo)));
  copy.sourcePhotos=await Promise.all((copy.sourcePhotos||[]).map(photo=>itemSnapshotPhoto(record,photo,'originals',repo)));
  copy.imageHistory=await Promise.all((copy.imageHistory||[]).map(async group=>({...group,photos:await Promise.all((group.photos||[]).map(photo=>itemSnapshotPhoto(record,photo,group.kind==='generated'?'generated':'originals',repo)))})));
+ copy.contextPhotos=await Promise.all((copy.contextPhotos||[]).map(photo=>itemSnapshotPhoto(record,photo,'context',repo)));
  return {schema:'avitolog.item.v1',schemaVersion:1,listingId:record.id,revision:record.revision||0,updatedAt:record.updatedAt||record.createdAt||new Date().toISOString(),item:copy};
 }
 async function syncStatusFolder(repo,document){
@@ -393,13 +399,13 @@ async function commandAlreadyAccepted(task,commandPath,repo){
  return true;
 }
 async function sendMailboxEvent(task){
- const listingId=task.markers?.listingId||task.payload?.itemId||task.payload?.item?.id,record=item(listingId)||task.payload?.item||null,repo=record?await ensureItemRepository(record):null,prefix=String(task.createdAt||new Date().toISOString()).replace(/\D/g,'').slice(0,14)+'-'+String(task.id).replace(/[^a-zA-Z0-9-]/g,''),commandPath='inbox/'+prefix+'-command.json',photos=(task.type==='cards.requested'?task.payload?.sourcePhotos:(['item.created','item.edited'].includes(task.type)?task.payload?.item?.photos:[]))||[],attachmentNames=(photos||[]).map(()=>null);
+ const listingId=task.markers?.listingId||task.payload?.itemId||task.payload?.item?.id,record=item(listingId)||task.payload?.item||null,repo=record?await ensureItemRepository(record):null,prefix=String(task.createdAt||new Date().toISOString()).replace(/\D/g,'').slice(0,14)+'-'+String(task.id).replace(/[^a-zA-Z0-9-]/g,''),commandPath='inbox/'+prefix+'-command.json',{photos,contextPhotos}=taskAttachmentGroups(task),attachments=[...photos,...contextPhotos],attachmentNames=attachments.map(()=>null);
  // Сеть могла оборваться после записи команды, но до локального подтверждения. В этом
  // случае команда уже есть в GitHub: не отправляем файлы заново и считаем её доставленной.
  if(await commandAlreadyAccepted(task,commandPath,repo)){queueMailboxStateSync();return;}
- for(let index=0;index<photos.length;index++){
-  const photo=photos[index],encoded=dataUriBase64(photo.src||photo.preview),extension=fileExtension(photo);if(!encoded)continue;
-  const name=prefix+'-'+(index+1)+'-photo.'+extension;
+ for(let index=0;index<attachments.length;index++){
+  const photo=attachments[index],encoded=dataUriBase64(photo.src||photo.preview),extension=fileExtension(photo);if(!encoded)continue;
+  const name=prefix+'-'+(index<photos.length?(index+1)+'-photo':'context-'+(index-photos.length+1))+'.'+extension;
   if(repo)await putRepositoryFile(repo,'tasks/in/'+name,encoded,'Add task attachment '+name);else await putMailboxFile('inbox/'+name,encoded,'Add attachment '+name);
   attachmentNames[index]=name;
  }
@@ -543,7 +549,7 @@ function field(label,control,help=''){return '<label class="field">'+label+contr
 function header(tab){
  const readyCount=state.items.filter(x=>x.status==='queue'||x.status==='ready'||x.status==='archived').length,publishedCount=state.items.filter(x=>x.status==='published').length,offerCount=state.items.reduce((n,x)=>n+(x.offers||[]).filter(o=>o.status==='pending').length,0);
  const tabs=[['analytics','Аналитика','Аналит.','/analytics',offerCount],['ready','Готовые','Готовые','/list/ready',readyCount],['published','Публик.','Публик.','/list/published',publishedCount]];
- return '<header class="main-head"><a class="calendar-link '+(tab==='calendar'?'active':'')+'" data-action="calendar-toggle" href="#/calendar">'+icon('calendar')+'Календарь</a><nav class="tabs" aria-label="Разделы">'+tabs.map(([key,label,short,href,count])=>link('<span class="long-label">'+label+'</span><span class="short-label">'+short+'</span><span class="count">'+count+'</span>',href,'tab '+(tab===key?'active':''))).join('')+'</nav></header>';}
+ return '<header class="main-head"><div class="header-calendar"><a class="calendar-link '+(tab==='calendar'?'active':'')+'" data-action="calendar-toggle" href="#/calendar">'+icon('calendar')+'Календарь</a><button type="button" class="icon-button header-refresh" data-action="refresh-app" aria-label="Обновить данные">'+icon('refresh')+'</button></div><nav class="tabs" aria-label="Разделы">'+tabs.map(([key,label,short,href,count])=>link('<span class="long-label">'+label+'</span><span class="short-label">'+short+'</span><span class="count">'+count+'</span>',href,'tab '+(tab===key?'active':''))).join('')+'</nav></header>';}
 function statusIndicator(x){if(typeof x!=='string'){const pending=state?.outbox?.some(task=>!task.deliveredAt&&(task.markers?.listingId===x.id||task.payload?.itemId===x.id||task.payload?.item?.id===x.id));if(pending)return '<span class="processing-status processing">'+(x.syncError?'Повторяем отправку':'Отправляется')+'</span>';if(x.syncError)return '<span class="processing-status archived">Не удалось отправить: '+esc(x.syncError)+'</span>';}const status=typeof x==='string'?x:x.status,labels={ready:'Готово к публикации',queue:(typeof x!=='string'&&x.syncedAt?'Отправлено':'Ожидает обработки'),archived:'Архив'},date=status==='archived'&&x.archivedAt?'<span class="archive-date">с '+shortDate(x.archivedAt.slice(0,10))+'</span>':'';return '<span class="processing-status '+(status==='ready'?'ready':status==='archived'?'archived':'processing')+'">'+labels[status]+'</span>'+date;}
 function analyticsPage(){
  const published=state.items.filter(x=>x.status==='published');
@@ -579,7 +585,7 @@ function visualReviewPanel(x){
  return section(note+link(icon('comment')+'Добавить комментарий по фото'+icon('next'),'/item/'+x.id+'/cards-comment','btn outline block action-link'),'visual-review');
 }
 function detailPage(x){
- const main=gallery(x)+section('<span class="tag">'+statusName[x.status]+'</span><h1 class="detail-title">'+esc(x.title)+'</h1><div class="detail-price">'+money(x.price)+'</div><div class="facts"><div><span>Самовывоз</span><b>'+x.pickupMinutes+' мин на получение</b></div><div><span>Доставка</span><b>'+(x.delivery?'Можно обсудить':'Не предусмотрена')+'</b></div></div>');
+ const main=gallery(x)+section('<span class="tag">'+statusName[x.status]+'</span><h1 class="detail-title">'+esc(x.title)+'</h1><div class="detail-price">'+money(x.price)+'</div><div class="facts"><div><span>Самовывоз</span><b>'+x.pickupMinutes+' мин на получение</b></div><div><span>Доставка</span><b>'+esc(deliveryLabel(x))+'</b></div></div>');
  const stats=x.stats||{},publicationStats=(x.status==='published'||x.status==='archived')?section('<h2>Статистика объявления</h2><div class="stats-grid"><div>'+icon('eye')+'<span>Просмотры</span><b>'+Number(stats.views||0)+'</b></div><div>'+icon('heart')+'<span>В избранном</span><b>'+Number(stats.favorites||0)+'</b></div><div>'+icon('comment')+'<span>Обращения</span><b>'+Number(stats.contacts||0)+'</b></div><div>'+icon('box')+'<span>Предложения</span><b>'+(x.offers||[]).length+'</b></div></div>'):'';
  const actions=x.status==='published'?section('<div class="actions-stack">'+link(icon('comment')+'Написавшие <span class="count">'+(x.chats||[]).length+'</span>'+icon('next'),'/item/'+x.id+'/writers','btn outline')+'</div>'):'';
  const prices='';
@@ -595,8 +601,11 @@ function priceSuggestions(d){
  if(!choices.length)return '';
  return '<div class="field price-suggestions"><span>Рекомендованные цены</span><div class="price-choices">'+choices.map(([label,price])=>'<button type="button" class="price-choice '+(Number(price)===Number(d.price)?'active':'')+'" data-action="set-draft-price" data-price="'+Number(price)+'"><small>'+label+'</small><b>'+money(price)+'</b></button>').join('')+'</div></div>';
 }
-function getDraft(id){const key=id||'new',fresh={photos:[],sourcePhotos:[],imageHistory:[],title:'',raw:'',description:'',price:null,pickupMinutes:60,delivery:false,productKind:'single',condition:'used',defects:'',quantity:1,generateCards:false,cardStyle:'realistic',cardFormat:'auto',cardCount:5};if(!draft||draft.key!==key){draft={key,...(id?structuredClone(item(id)):structuredClone(state?.newDraft||fresh))};}return draft;}
-function productFields(d){const kind=d.productKind==='batch'?'batch':'single',condition=d.condition==='new'?'new':'used';return '<section class="section product-section"><h2>Параметры товара</h2><div class="segmented" role="radiogroup" aria-label="Тип товара"><label><input type="radio" name="productKind" value="single" '+(kind==='single'?'checked':'')+'><span>Товар 1</span></label><label><input type="radio" name="productKind" value="batch" '+(kind==='batch'?'checked':'')+'><span>Товар тиражный</span></label></div><div class="product-single '+(kind==='single'?'':'is-hidden')+'"><div class="field-label">Состояние</div><div class="segmented condition" role="radiogroup" aria-label="Состояние"><label><input type="radio" name="condition" value="used" '+(condition==='used'?'checked':'')+'><span>Б/у</span></label><label><input type="radio" name="condition" value="new" '+(condition==='new'?'checked':'')+'><span>Новое</span></label></div></div><div class="product-batch '+(kind==='batch'?'':'is-hidden')+'">'+field('Количество штук','<input name="quantity" type="number" min="1" step="1" inputmode="numeric" value="'+(Number(d.quantity)||1)+'">','Укажите, сколько одинаковых единиц есть в наличии.')+'</div>'+field('Дефекты и нюансы','<textarea name="defects" rows="3" placeholder="Если есть — опишите честно. Не попадёт в описание и карточки.">'+esc(d.defects||'')+'</textarea>')+'</section>';}
+function getDraft(id){const key=id||'new',fresh={photos:[],sourcePhotos:[],imageHistory:[],contextPhotos:[],title:'',raw:'',description:'',price:null,pickupMinutes:60,delivery:false,deliveryMode:'avito',deliveryCity:'',deliveryArea:false,context:'',productKind:'single',condition:'used',quantity:1,generateCards:false,cardStyle:'realistic',cardFormat:'auto',cardCount:5};if(!draft||draft.key!==key){draft={key,...(id?structuredClone(item(id)):structuredClone(state?.newDraft||fresh))};}return draft;}
+function deliveryLabel(d){if(!d?.delivery)return 'Не предусмотрена';if(d.deliveryMode==='local'){const place=d.deliveryCity||'своему городу';return d.deliveryArea?place+' и область':place;}return 'Авито Доставка';}
+function deliveryFields(d){const enabled=!!d.delivery,local=d.deliveryMode==='local';return '<label class="switch-row delivery-switch">Доставка<input name="delivery" type="checkbox" '+(enabled?'checked':'')+'></label><div class="delivery-config '+(enabled?'':'is-hidden')+'"><div class="segmented" role="radiogroup" aria-label="Способ доставки"><label><input type="radio" name="deliveryMode" value="avito" '+(!local?'checked':'')+'><span>Авито Доставка</span></label><label><input type="radio" name="deliveryMode" value="local" '+(local?'checked':'')+'><span>Своя доставка</span></label></div><div class="delivery-local '+(local?'':'is-hidden')+'">'+field('Город','<input name="deliveryCity" maxlength="120" placeholder="Например, Санкт-Петербург" value="'+esc(d.deliveryCity||'')+'">','Укажите город, куда можете привезти товар.')+'<label class="switch-row">По всему городу и области<input name="deliveryArea" type="checkbox" '+(d.deliveryArea?'checked':'')+'></label></div></div>';}
+function contextPhotosHtml(d){const photos=d.contextPhotos||[];const tiles=photos.map((photo,index)=>'<div class="photo-tile context-photo"><img loading="lazy" decoding="async" src="'+esc(photo.preview||mediaSrc(photo))+'" alt="Контекст '+(index+1)+'"><button type="button" class="remove" data-action="context-photo-remove" data-index="'+index+'" aria-label="Удалить вложение '+(index+1)+'">'+icon('close')+'</button></div>').join('');return '<div class="context-photos">'+(tiles?'<div class="photo-grid">'+tiles+'</div>':'')+'<button type="button" class="btn outline block" data-action="context-photo-add">'+icon('plus')+'Прикрепить фотографии</button><input class="file-input" id="context-photo-files" type="file" accept="image/*" multiple></div>';}
+function productFields(d){const kind=d.productKind==='batch'?'batch':'single',condition=d.condition==='new'?'new':'used';return '<section class="section product-section"><h2>Параметры товара</h2><div class="segmented" role="radiogroup" aria-label="Тип товара"><label><input type="radio" name="productKind" value="single" '+(kind==='single'?'checked':'')+'><span>Товар 1</span></label><label><input type="radio" name="productKind" value="batch" '+(kind==='batch'?'checked':'')+'><span>Товар тиражный</span></label></div><div class="product-single '+(kind==='single'?'':'is-hidden')+'"><div class="field-label">Состояние</div><div class="segmented condition" role="radiogroup" aria-label="Состояние"><label><input type="radio" name="condition" value="used" '+(condition==='used'?'checked':'')+'><span>Б/у</span></label><label><input type="radio" name="condition" value="new" '+(condition==='new'?'checked':'')+'><span>Новое</span></label></div></div><div class="product-batch '+(kind==='batch'?'':'is-hidden')+'">'+field('Количество штук','<input name="quantity" type="number" min="1" step="1" inputmode="numeric" value="'+(Number(d.quantity)||1)+'">','Укажите, сколько одинаковых единиц есть в наличии.')+'</div>'+field('Контекст диалога','<textarea name="context" rows="4" placeholder="Что можно объяснить покупателю, важные детали, условия и ссылки на материалы.">'+esc(d.context||d.defects||'')+'</textarea>','Хранится в репозитории этого объявления и помогает вести переписку. Не используется в карточках.')+contextPhotosHtml(d)+'</section>';}
 function cardSettingsKey(d){return JSON.stringify([!!d.generateCards,normalizeCardStyle(d.cardStyle),normalizeCardFormat(d.cardFormat),Number(d.cardCount)||5]);}
 function cardsRegenerationChanged(d){
  if(!d?.id||d.key==='new'||!d.generateCards)return false;
@@ -624,7 +633,7 @@ function cardsHtml(d){
  const options=Object.entries(CARD_STYLES).map(([key,value])=>'<label class="card-style-option"><input type="radio" name="cardStyle" value="'+key+'" '+(style===key?'checked':'')+'><span><b>'+value.label+'</b><small>'+value.description+'</small></span></label>').join('');
  const formats=[['portrait','3:4'],['landscape','4:3'],['auto','Подобрать по товару']].map(([key,label])=>'<label class="format-option"><input type="radio" name="cardFormat" value="'+key+'" '+(format===key?'checked':'')+'><span class="format-shape '+key+'">'+label+'</span></label>').join('');
  const example=style==='realistic'?'home':style;
- return '<section class="section cards-section"><label class="switch-row card-switch"><span><b>Создать карточки</b><small>Выберите оформление и количество изображений</small></span><input type="checkbox" name="generateCards" data-action="cards-toggle" '+(enabled?'checked':'')+'></label><div id="cards-config" class="cards-config '+(enabled?'':'is-hidden')+'"><div class="divider"></div><h2>Оформление</h2><div class="card-style-options">'+options+'</div><img class="style-example" src="./card-examples/'+example+'-01.png" alt="Пример: '+CARD_STYLES[style].label+'" loading="lazy" decoding="async"><div class="field"><span>Формат всей серии</span><div class="format-options">'+formats+'</div></div><div class="field"><span>Количество карточек</span><input type="hidden" name="cardCount" value="'+count+'"><div class="count-reel-frame"><div class="count-reel" aria-label="Количество карточек">'+Array.from({length:10},(_,i)=>'<button type="button" data-action="card-count" data-count="'+(i+1)+'" aria-pressed="'+(count===i+1)+'">'+(i+1)+'</button>').join('')+'</div></div><small id="card-count-note">В серии '+plural(count,'карточка','карточки','карточек')+'.</small>'+regenerationButton(d)+'</div><p class="help">Все карточки одной серии будут одного формата.</p></div></section>';
+ return '<section class="section cards-section"><label class="switch-row card-switch"><span><b>Создать карточки</b><small>Выберите оформление и количество изображений</small></span><input type="checkbox" name="generateCards" data-action="cards-toggle" '+(enabled?'checked':'')+'></label><div id="cards-config" class="cards-config '+(enabled?'':'is-hidden')+'"><div class="divider"></div><h2>Оформление</h2><div class="card-style-options">'+options+'</div><img class="style-example" src="./card-examples/'+example+'-01.png" alt="Пример: '+CARD_STYLES[style].label+'" loading="lazy" decoding="async"><div class="field"><span>Формат всей серии</span><div class="format-options">'+formats+'</div></div><div class="field"><span>Количество карточек</span><input type="hidden" name="cardCount" value="'+count+'"><div class="count-reel-frame"><div class="count-reel" aria-label="Количество карточек">'+Array.from({length:10},(_,i)=>'<button type="button" data-action="card-count" data-count="'+(i+1)+'" aria-pressed="'+(count===i+1)+'">'+(i+1)+'</button>').join('')+'</div></div><small id="card-count-note">В серии '+plural(count,'карточка','карточки','карточек')+'.</small></div><p class="help">После изменения оформления, формата или количества сохраните объявление — новая серия уйдёт в обработку автоматически.</p></div></section>';
 }
 
 function unusedPhotos(d){return availableImageHistory(d)[0].photos.filter(photo=>!d.photos.some(active=>samePhoto(active,photo)));}
@@ -637,7 +646,7 @@ function photosHtml(d){
  const tiles=d.photos.map((p,i)=>'<div class="photo-tile" data-sort-list="current" data-sort-index="'+i+'"><img loading="lazy" decoding="async" src="'+esc(p.preview||mediaSrc(p))+'" alt="Фото '+(i+1)+'" draggable="false"><button type="button" class="remove" data-action="photo-remove" data-index="'+i+'" aria-label="Удалить фото '+(i+1)+'">'+icon('close')+'</button>'+(i===0?'<span class="photo-order">Главное</span>':'')+'</div>').join('');
  return '<details class="photos-collapse" open><summary class="photo-editor-head"><b>Фотографии</b><span class="meta">'+d.photos.length+' / 10</span><span class="photos-arrow">⌄</span></summary><div class="photo-grid">'+tiles+(d.photos.length<10?'<button type="button" class="photo-add" data-action="photo-add">'+icon('plus')+'Добавить фото</button>':'')+'</div><input class="file-input" id="photo-files" type="file" accept="image/*" multiple>'+allPhotosHtml(d)+'</details>';
 }
-function editPage(id){const d=getDraft(id),isNew=!id,back=isNew?'/list/ready':'/item/'+id;let fields=isNew?field('Что знаете о товаре','<textarea name="raw" rows="7" placeholder="Состояние, комплект, история…">'+esc(d.raw)+'</textarea>'):field('Заголовок','<input name="title" maxlength="50" required value="'+esc(d.title)+'">','До 50 символов')+field('Исходные заметки','<textarea name="raw" rows="5">'+esc(d.raw)+'</textarea>')+field('Описание объявления','<textarea name="description" rows="9">'+esc(d.description)+'</textarea>');fields+=priceSuggestions(d)+field(isNew?'Желаемая цена, ₽':'Цена, ₽','<input name="price" type="number" min="0" max="1000000000" inputmode="numeric" value="'+(d.price??'')+'" placeholder="Необязательно">');if(!isNew)fields+=field('Время на получение, минут','<input name="pickupMinutes" type="number" inputmode="numeric" min="30" max="480" step="5" required value="'+d.pickupMinutes+'">','Учтите осмотр, разборку и вынос.')+'<label class="switch-row">Доставку можно обсудить<input name="delivery" type="checkbox" '+(d.delivery?'checked':'')+'></label>';return page(isNew?'Новое объявление':'Редактирование',back,'<form id="item-form">'+section('<div id="photo-editor">'+photosHtml(d)+'</div>')+section(fields)+cardsHtml(d)+productFields(d)+'<div id="form-error" aria-live="polite"></div></form>'+(isNew?section(btn('Удалить черновик','delete-draft','danger block'),'delete-zone'):''),'<button class="btn primary" type="submit" form="item-form">'+(isNew?'Добавить объявление':'Сохранить изменения')+'</button>',true);}
+function editPage(id){const d=getDraft(id),isNew=!id,back=isNew?'/list/ready':'/item/'+id;let fields=isNew?field('Что знаете о товаре','<textarea name="raw" rows="7" placeholder="Состояние, комплект, история…">'+esc(d.raw)+'</textarea>'):field('Заголовок','<input name="title" maxlength="50" required value="'+esc(d.title)+'">','До 50 символов')+field('Исходные заметки','<textarea name="raw" rows="5">'+esc(d.raw)+'</textarea>')+field('Описание объявления','<textarea name="description" rows="9">'+esc(d.description)+'</textarea>');fields+=priceSuggestions(d)+field(isNew?'Желаемая цена, ₽':'Цена, ₽','<input name="price" type="number" min="0" max="1000000000" inputmode="numeric" value="'+(d.price??'')+'" placeholder="Необязательно">');if(!isNew)fields+=field('Время на получение, минут','<input name="pickupMinutes" type="number" inputmode="numeric" min="30" max="480" step="5" required value="'+d.pickupMinutes+'">','Учтите осмотр, разборку и вынос.')+deliveryFields(d);return page(isNew?'Новое объявление':'Редактирование',back,'<form id="item-form">'+section('<div id="photo-editor">'+photosHtml(d)+'</div>')+section(fields)+cardsHtml(d)+productFields(d)+'<div id="form-error" aria-live="polite"></div></form>'+(isNew?section(btn('Удалить черновик','delete-draft','danger block'),'delete-zone'):''),'<button class="btn primary" type="submit" form="item-form">'+(isNew?'Добавить объявление':'Сохранить изменения')+'</button>',true);}
 function commentsPage(x){return page('Комментарий для ИИ','/item/'+x.id,section('<h2>'+esc(x.title)+'</h2><p>Укажите, что нужно изменить, уточнить или учесть при обработке текста объявления.</p><form id="comment-form">'+field('Комментарий','<textarea name="text" rows="6" required placeholder="Например: уточнить комплект и самовывоз…"></textarea>')+'</form>')+section('<h2>Комментарии</h2>'+((x.comments||[]).length?x.comments.slice().reverse().map(c=>'<div class="comment">'+esc(c.text)+'<small>'+stamp(c.createdAt)+' · Сохранён для обработки</small></div>').join(''):'<p>Комментариев пока нет.</p>')),'<button class="btn primary" form="comment-form" type="submit">Сохранить комментарий</button>');}
 function cardCommentsPage(x){const comments=x.cardComments||[];return page('Комментарий по фото','/item/'+x.id,section('<h2>'+esc(x.title)+'</h2><p>Этот комментарий относится только к фотографиям и карточкам товара. Текст объявления не меняется.</p><form id="card-comment-form">'+field('Что исправить на фото','<textarea name="text" rows="6" required placeholder="Например: показать клавиши крупнее, не менять цвет товара…"></textarea>')+'</form>')+section('<h2>История комментариев по фото</h2>'+(comments.length?comments.slice().reverse().map(c=>'<div class="comment">'+esc(c.text)+'<small>'+stamp(c.createdAt)+' · Сохранён для обработки карточек</small></div>').join(''):'<p>Комментариев по фото пока нет.</p>')),'<button class="btn primary" form="card-comment-form" type="submit">Отправить комментарий по фото</button>');}
 function writersPage(x){
@@ -724,6 +733,7 @@ async function hydrateListingMedia(record,full,{sources=false,history=false,limi
  record.photos=await hydrate(record.photos);
  if(sources)record.sourcePhotos=await hydrate(record.sourcePhotos);
  if(history&&(record.imageHistory||[]).some(group=>(group.photos||[]).some(photo=>!mediaSrc(photo))))record.imageHistory=await Promise.all(record.imageHistory.map(async group=>({...group,photos:await hydrate(group.photos)})));
+ if(history)record.contextPhotos=await hydrate(record.contextPhotos);
  return changed;
 }
 
@@ -815,16 +825,16 @@ async function saveItem(form){
  const f=new FormData(form),isNew=draft.key==='new';
  const raw=String(f.get('raw')||'').trim(),productKind=f.get('productKind')==='batch'?'batch':'single';
  const quantity=productKind==='batch'?(Number(f.get('quantity'))||null):null;
- const data={...(isNew?{}:item(draft.id)),id:isNew?uid():draft.id,status:isNew?'queue':draft.status,title:isNew?(raw.split(/[\n.!?]/)[0]||'Новое объявление').slice(0,50):String(f.get('title')||'').trim(),raw,description:isNew?'':String(f.get('description')||''),photos:draft.photos,imageHistory:structuredClone(draft.imageHistory||[]),price:f.get('price')===''?null:Number(f.get('price')),pickupMinutes:isNew?60:Number(f.get('pickupMinutes')),delivery:!isNew&&f.has('delivery'),productKind,condition:productKind==='single'?(f.get('condition')==='new'?'new':'used'):null,defects:String(f.get('defects')||'').trim(),quantity,generateCards:f.has('generateCards'),cardStyle:normalizeCardStyle(f.get('cardStyle')),cardFormat:normalizeCardFormat(f.get('cardFormat')),cardCount:Number(f.get('cardCount'))||1,updatedAt:new Date().toISOString()};
- const existing=isNew?null:item(draft.id);
+ const data={...(isNew?{}:item(draft.id)),id:isNew?uid():draft.id,status:isNew?'queue':draft.status,title:isNew?(raw.split(/[\n.!?]/)[0]||'Новое объявление').slice(0,50):String(f.get('title')||'').trim(),raw,description:isNew?'':String(f.get('description')||''),photos:draft.photos,imageHistory:structuredClone(draft.imageHistory||[]),contextPhotos:structuredClone(draft.contextPhotos||[]),price:f.get('price')===''?null:Number(f.get('price')),pickupMinutes:isNew?60:Number(f.get('pickupMinutes')),delivery:!isNew&&f.has('delivery'),deliveryMode:f.get('deliveryMode')==='local'?'local':'avito',deliveryCity:String(f.get('deliveryCity')||'').trim(),deliveryArea:!isNew&&f.has('deliveryArea'),context:String(f.get('context')||'').trim(),defects:'',productKind,condition:productKind==='single'?(f.get('condition')==='new'?'new':'used'):null,quantity,generateCards:f.has('generateCards'),cardStyle:normalizeCardStyle(f.get('cardStyle')),cardFormat:normalizeCardFormat(f.get('cardFormat')),cardCount:Number(f.get('cardCount'))||1,updatedAt:new Date().toISOString()};
+ const existing=isNew?null:item(draft.id),cardSettingsChanged=!isNew&&data.generateCards&&cardSettingsKey(data)!==(existing.cardGenerationSettings||cardSettingsKey(existing));
  if(existing)data.cardGenerationSettings=existing.cardGenerationSettings||cardSettingsKey(existing);
  if(isNew){data.sourcePhotos=structuredClone(draft.photos);data.syncState='pending';delete data.syncError;delete data.syncFailedAt;}
  else data.sourcePhotos=structuredClone(activeCardPhotos(draft));
    if(data.pickupMinutes<30||data.pickupMinutes>480)throw Error('Укажите время получения от 30 до 480 минут');
  const event={id:uid(),type:'item.upsert',payload:normalItem(data)};
  if(isNew)clearTimeout(draftSaveTimer);
- await commit(s=>{const next=receiveEvent(s,event),saved=next.items.find(x=>x.id===data.id),{signature,previous}=isNew?prepareCardRequest(saved,null):{signature:null,previous:null};next.newDraft=null;addOutbox(next,isNew?'item.created':'item.edited',{itemId:data.id,item:saved},{...listingMarkers(saved,isNew?'listing.create':'listing.update'),cards:{...cardSpec(saved),requested:isNew&&!!signature},generateImages:isNew&&!!signature});if(signature&&signature!==previous)addOutbox(next,'cards.requested',{itemId:data.id,item:cardInputItem(saved),sourcePhotos:structuredClone(activeCardPhotos(saved)),requestId:uid(),...cardSpec(saved),requestKey:signature,photoIds:activeCardPhotos(saved).map(p=>p.id)},{action:'cards.generate',listingId:data.id,cards:{...cardSpec(saved),requestKey:signature}});return next;});
- draft=null;go(isNew?'/list/ready':'/item/'+data.id);toast(isNew?'Объявление добавлено. Отправляем…':'Изменения сохранены. Отправляем…');
+ await commit(s=>{const next=receiveEvent(s,event),saved=next.items.find(x=>x.id===data.id),{signature,previous}=(isNew||cardSettingsChanged)?prepareCardRequest(saved,isNew?null:existing):{signature:null,previous:null};if(isNew||cardSettingsChanged)saved.cardGenerationSettings=cardSettingsKey(saved);next.newDraft=null;addOutbox(next,isNew?'item.created':'item.edited',{itemId:data.id,item:saved},{...listingMarkers(saved,isNew?'listing.create':'listing.update'),cards:{...cardSpec(saved),requested:!!signature&&signature!==previous},generateImages:!!signature&&signature!==previous});if(signature&&signature!==previous)addOutbox(next,'cards.requested',{itemId:data.id,item:cardInputItem(saved),sourcePhotos:structuredClone(activeCardPhotos(saved)),requestId:uid(),...cardSpec(saved),requestKey:signature,photoIds:activeCardPhotos(saved).map(p=>p.id)},{action:'cards.generate',listingId:data.id,cards:{...cardSpec(saved),requestKey:signature}});return next;});
+ draft=null;go(isNew?'/list/ready':'/item/'+data.id);toast(isNew?'Объявление добавлено. Отправляем…':cardSettingsChanged?'Изменения сохранены. Новая серия отправлена в обработку.':'Изменения сохранены. Отправляем…');
 }
 root.addEventListener('submit',async e=>{
  e.preventDefault();const form=e.target;if(!form.checkValidity()){form.reportValidity();return;}
@@ -858,6 +868,7 @@ root.addEventListener('click',async e=>{
  if(photoSortSuppressClick){e.preventDefault();photoSortSuppressClick=false;return;}
  const b=e.target.closest('[data-action]');if(!b||b.disabled)return;const action=b.dataset.action;
  try{
+ if(action==='refresh-app'){b.disabled=true;try{await syncMailboxState(true);await syncMailboxResults();render();toast('Данные обновлены');}finally{b.disabled=false;}return;}
  if(action==='calendar-toggle'){
   e.preventDefault();
   if(route().path==='/calendar')go(calendarReturnPath||'/analytics');
@@ -867,6 +878,8 @@ root.addEventListener('click',async e=>{
  if(action==='cards-regenerate'){await requestEditedCards(b);return;}
  if(action==='card-count'){setCardCount(Number(b.dataset.count));const reel=b.closest('.count-reel');if(reel)reel.scrollTo({left:b.offsetLeft-(reel.clientWidth-b.offsetWidth)/2,behavior:'smooth'});return;}
  if(action==='photo-add'){document.getElementById('photo-files').click();return;}
+ if(action==='context-photo-add'){document.getElementById('context-photo-files')?.click();return;}
+ if(action==='context-photo-remove'){draft.contextPhotos.splice(Number(b.dataset.index),1);refreshContextPhotos();queueDraftSave();return;}
  if(action==='photo-remove'){archiveCurrentPhotos(draft);const [removed]=draft.photos.splice(Number(b.dataset.index),1);if(removed)draft.imageHistory.unshift({id:uid(),label:'Все фотографии',kind:'library',createdAt:new Date().toISOString(),photos:[structuredClone(removed)]});refreshPhotos();return;}
  if(action==='history-add'){const group=availableImageHistory(draft).find(value=>value.id===b.dataset.history),photo=group?.photos?.find(value=>value.id===b.dataset.photo);if(!photo||!mediaSrc(photo))throw Error('Изображение из истории пока недоступно');if(draft.photos.length>=10)throw Error('Можно добавить не больше 10 фотографий');if(draft.photos.some(value=>samePhoto(value,photo))){refreshPhotos();return;}draft.photos.push(structuredClone(photo));refreshPhotos();return;}
  if(action==='history-load'){
@@ -945,8 +958,9 @@ function installCountReel(){
 }
 function refreshCardCountNote(){const value=Math.max(1,Math.min(10,Number(document.querySelector('input[name=cardCount]')?.value)||1)),note=document.getElementById('card-count-note');if(note)note.textContent='В серии '+plural(value,'карточка','карточки','карточек')+'.';}
 function syncProductFields(){const kind=document.querySelector('input[name=productKind]:checked')?.value||'single';document.querySelector('.product-single')?.classList.toggle('is-hidden',kind!=='single');document.querySelector('.product-batch')?.classList.toggle('is-hidden',kind!=='batch');}
+function syncDeliveryFields(){const enabled=!!document.querySelector('input[name=delivery]')?.checked,local=document.querySelector('input[name=deliveryMode]:checked')?.value==='local';document.querySelector('.delivery-config')?.classList.toggle('is-hidden',!enabled);document.querySelector('.delivery-local')?.classList.toggle('is-hidden',!enabled||!local);}
 let draftSaveTimer;
-function syncNewDraft(){const form=document.getElementById('item-form');if(!form||draft?.key!=='new')return;const f=new FormData(form);draft.raw=String(f.get('raw')||'');draft.price=f.get('price')===''?null:Number(f.get('price'));draft.productKind=f.get('productKind')==='batch'?'batch':'single';draft.condition=f.get('condition')==='new'?'new':'used';draft.quantity=Number(f.get('quantity'))||1;draft.defects=String(f.get('defects')||'');draft.generateCards=f.has('generateCards');draft.cardStyle=normalizeCardStyle(f.get('cardStyle'));draft.cardFormat=normalizeCardFormat(f.get('cardFormat'));draft.cardCount=Math.max(1,Math.min(10,Number(f.get('cardCount'))||1));queueDraftSave();}
+function syncNewDraft(){const form=document.getElementById('item-form');if(!form||draft?.key!=='new')return;const f=new FormData(form);draft.raw=String(f.get('raw')||'');draft.price=f.get('price')===''?null:Number(f.get('price'));draft.productKind=f.get('productKind')==='batch'?'batch':'single';draft.condition=f.get('condition')==='new'?'new':'used';draft.quantity=Number(f.get('quantity'))||1;draft.context=String(f.get('context')||'');draft.generateCards=f.has('generateCards');draft.cardStyle=normalizeCardStyle(f.get('cardStyle'));draft.cardFormat=normalizeCardFormat(f.get('cardFormat'));draft.cardCount=Math.max(1,Math.min(10,Number(f.get('cardCount'))||1));queueDraftSave();}
 function queueDraftSave(){if(draft?.key!=='new')return;clearTimeout(draftSaveTimer);draftSaveTimer=setTimeout(()=>{if(draft?.key!=='new')return;const snapshot=structuredClone(draft);commit(s=>{s.newDraft=snapshot;return s;}).catch(()=>toast('Не удалось сохранить черновик'));},600);}
 function fileData(file){return new Promise((resolve,reject)=>{const r=new FileReader();r.onload=()=>resolve(r.result);r.onerror=()=>reject(Error('Не удалось прочитать фото '+file.name));r.readAsDataURL(file);});}
 function previewData(src){return new Promise(resolve=>{const image=new Image();image.onload=()=>{const max=480,scale=Math.min(1,max/Math.max(image.width,image.height)),canvas=document.createElement('canvas');canvas.width=Math.max(1,Math.round(image.width*scale));canvas.height=Math.max(1,Math.round(image.height*scale));canvas.getContext('2d').drawImage(image,0,0,canvas.width,canvas.height);resolve(canvas.toDataURL('image/jpeg',.72));};image.onerror=()=>resolve(null);image.src=src;});}
@@ -964,15 +978,31 @@ async function ingestPhotos(files,input){
  rememberPhotoSet(targetDraft,saved,'Все фотографии','source');targetDraft.photos.push(...saved);if(targetDraft.key!=='new'){targetDraft.sourcePhotos??=[];targetDraft.sourcePhotos.push(...structuredClone(saved));}refreshPhotos();toast('Добавлено фото: '+files.length);
  }catch(err){toast(err.message);if(input)input.value='';}finally{photoBusy=false;}
 }
+function refreshContextPhotos(){const current=document.querySelector('.context-photos');if(current&&draft)current.outerHTML=contextPhotosHtml(draft);}
+async function ingestContextPhotos(files,input){
+ const targetDraft=draft;
+ try{
+  if(photoBusy)throw Error('Фотографии ещё загружаются');
+  if(targetDraft.contextPhotos.length+files.length>10)throw Error('Можно прикрепить не больше 10 фотографий к контексту');
+  if(files.some(f=>!f.type.startsWith('image/')))throw Error('Выберите файлы фотографий');
+  if(files.some(f=>f.size>20*1024*1024))throw Error('Одна фотография должна быть не больше 20 МБ');
+  photoBusy=true;
+  const saved=await Promise.all(files.map(async f=>{const src=await fileData(f);return {id:uid(),name:f.name,type:f.type,src,preview:await previewData(src)};}));
+  if(draft!==targetDraft)return;
+  targetDraft.contextPhotos.push(...saved);refreshContextPhotos();queueDraftSave();toast('Добавлено вложений: '+files.length);
+ }catch(err){toast(err.message);if(input)input.value='';}finally{photoBusy=false;}
+}
 root.addEventListener('change',async e=>{
  const input=e.target;
  if(input.name==='productKind'){if(draft)draft.productKind=input.value==='batch'?'batch':'single';syncProductFields();syncNewDraft();return;}
+ if(input.name==='delivery'||input.name==='deliveryMode'){syncDeliveryFields();syncNewDraft();return;}
  if(input.name==='cardStyle'&&draft){draft.cardStyle=normalizeCardStyle(input.value);refreshCards();queueDraftSave();return;}
  if(input.name==='cardFormat'&&draft){draft.cardFormat=normalizeCardFormat(input.value);queueDraftSave();return;}
  if(input.name==='cardCount'&&draft){draft.cardCount=Math.max(1,Math.min(10,Number(input.value)||1));refreshCards();queueDraftSave();return;}
  if(draft?.key==='new'&&input.closest('#item-form'))syncNewDraft();
  if(input.id==='booking-slot'){const r=route();go('/item/'+r.parts[1]+'/book/'+r.parts[3]+'?slot='+input.value);return;}
  if(input.id==='photo-files')await ingestPhotos(Array.from(input.files||[]),input);
+ if(input.id==='context-photo-files')await ingestContextPhotos(Array.from(input.files||[]),input);
 });
 root.addEventListener('paste',async e=>{
  if(!draft)return;
