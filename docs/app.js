@@ -630,7 +630,7 @@ function cardsHtml(d){
 function unusedPhotos(d){return availableImageHistory(d)[0].photos.filter(photo=>!d.photos.some(active=>samePhoto(active,photo)));}
 function allPhotosHtml(d){
  const all=unusedPhotos(d),photos=all.filter(mediaSrc),missing=all.length-photos.length;
- return '<details class="all-photos"><summary class="all-photos-head">Все фотографии<span class="meta">'+all.length+'</span></summary><div class="all-photos-body">'+(photos.length?'<div class="history-photos">'+photos.map(photo=>'<button type="button" data-action="history-add" data-history="all-images" data-photo="'+esc(photo.id)+'" aria-label="Добавить изображение в объявление"><img loading="lazy" decoding="async" src="'+esc(photo.preview||mediaSrc(photo))+'" alt="" draggable="false"></button>').join('')+'</div>':'')+(missing?'<button type="button" class="btn outline block" data-action="history-load">Загрузить фотографии из истории</button>':'')+(!photos.length&&!missing?'<p class="help">Все фотографии уже в объявлении.</p>':'')+'</div></details>';
+ return '<details class="all-photos"><summary class="all-photos-head">Все фотографии<span class="meta">'+all.length+'</span></summary><div class="all-photos-body">'+(photos.length?'<div class="history-photos">'+photos.map(photo=>'<button type="button" data-action="history-add" data-history="all-images" data-photo="'+esc(photo.id)+'" aria-label="Добавить изображение в объявление"><img loading="lazy" decoding="async" src="'+esc(photo.preview||mediaSrc(photo))+'" alt="" draggable="false"></button>').join('')+'</div>':'')+(!photos.length&&!missing?'<p class="help">Все фотографии уже в объявлении.</p>':'')+'<button type="button" class="btn outline block" data-action="history-load">Обновить историю</button></div></details>';
 }
 
 function photosHtml(d){
@@ -869,7 +869,20 @@ root.addEventListener('click',async e=>{
  if(action==='photo-add'){document.getElementById('photo-files').click();return;}
  if(action==='photo-remove'){archiveCurrentPhotos(draft);const [removed]=draft.photos.splice(Number(b.dataset.index),1);if(removed)draft.imageHistory.unshift({id:uid(),label:'Все фотографии',kind:'library',createdAt:new Date().toISOString(),photos:[structuredClone(removed)]});refreshPhotos();return;}
  if(action==='history-add'){const group=availableImageHistory(draft).find(value=>value.id===b.dataset.history),photo=group?.photos?.find(value=>value.id===b.dataset.photo);if(!photo||!mediaSrc(photo))throw Error('Изображение из истории пока недоступно');if(draft.photos.length>=10)throw Error('Можно добавить не больше 10 фотографий');if(draft.photos.some(value=>samePhoto(value,photo))){refreshPhotos();return;}draft.photos.push(structuredClone(photo));refreshPhotos();return;}
- if(action==='history-load'){b.disabled=true;try{await hydrateListingMedia(draft,true,{sources:true,history:true});refreshPhotos();}finally{b.disabled=false;}return;}
+ if(action==='history-load'){
+  b.disabled=true;const label=b.textContent;b.textContent='Обновляем историю…';
+  try{
+   // Сначала берём актуальный listing.json: за время открытого редактора в нём
+   // могла появиться новая или предыдущая серия карточек.
+   if(draft?.itemRepository){
+    const remote=await hydrateItemRepository(draft,{refresh:true});
+    preserveRemoteListingMedia(draft,remote);
+   }
+   await hydrateListingMedia(draft,true,{sources:true,history:true});
+   refreshPhotos();
+  }finally{b.disabled=false;b.textContent=label;}
+  return;
+ }
  if(action==='cards-toggle'){draft.generateCards=b.checked;refreshCards();queueDraftSave();return;}
  if(action.startsWith('gallery-')){
  const track=document.getElementById('gallery-track');if(!track)return;
@@ -916,7 +929,7 @@ function installPhotoSorting(){
  const editor=document.getElementById('photo-editor');
  disposePhotoSorting=editor?installPhotoSort(editor,{move:movePhoto,refresh:refreshPhotos}):null;
 }
-function refreshPhotos(){const el=document.getElementById('photo-editor');if(el){const wasOpen=!!el.querySelector('.photos-collapse[open]');el.innerHTML=photosHtml(draft);const library=el.querySelector('.photos-collapse');if(library)library.open=wasOpen;}installPhotoSorting();queueDraftSave();}
+function refreshPhotos(){const el=document.getElementById('photo-editor');if(el){const wasOpen=!!el.querySelector('.photos-collapse[open]'),wasHistoryOpen=!!el.querySelector('.all-photos[open]');el.innerHTML=photosHtml(draft);const library=el.querySelector('.photos-collapse'),history=el.querySelector('.all-photos');if(library)library.open=wasOpen;if(history)history.open=wasHistoryOpen;}installPhotoSorting();queueDraftSave();}
 function refreshCards(){const el=document.getElementById('cards-config');if(!el||!draft)return;const temp=document.createElement('div');temp.innerHTML=cardsHtml(draft);const next=temp.querySelector('#cards-config');if(next){el.replaceWith(next);installCountReel();}}
 function setCardCount(value){
  if(!draft)return;draft.cardCount=value;
