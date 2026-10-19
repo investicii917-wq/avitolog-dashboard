@@ -69,9 +69,10 @@ context.fetch=async(url,options={})=>{
 api.connect({repo:'test/private-mailbox',accessKey:'test-only-not-a-secret'});
 await api.sendMailboxEvent(event);
 check(puts.some(path=>path.endsWith('.png'))&&puts.some(path=>path.startsWith('tasks/in/')&&path.endsWith('.json')));
+check(!puts.some(path=>path.startsWith('tasks/in/')&&path.endsWith('.png')));
 const received=[...memoryRepo.values()].flatMap(value=>{try{return [JSON.parse(Buffer.from(value,'base64').toString('utf8'))];}catch{return [];}}).find(value=>value.input?.payload?.requestKey===base.cardRequestKey)?.input;
 check(received?.payload?.requestKey===base.cardRequestKey&&received?.markers?.cards?.style==='designer');
-check(!!received?.payload?.sourcePhotos?.[0]?.file);
+check(received?.transportVersion===2&&received?.payload?.sourcePhotos?.[0]?.file==='images/originals/src.png');
 // Separate state represents another device. No browser credentials or real listings involved.
 const second=model.blankState();second.items.push(structuredClone(base));
 const loaded=photos.map(p=>({...p,mediaPath:'images/generated/test/'+p.file,path:'images/generated/test/'+p.file,src:'data:image/png;base64,YQ=='}));

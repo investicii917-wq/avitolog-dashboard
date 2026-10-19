@@ -76,14 +76,14 @@ function updateUploadBanner(){
  banner.textContent=retrying?'Связь прервалась — повторяем отправку':'Объявление загружается — не выходите';
  banner.hidden=!pending;
 }
-async function commit(transform){const job=commitQueue.then(async()=>{const next=await transform(state);await saveState(next);state=next;updateUploadBanner();queueMailboxSync(250);queueMailboxStateSync(3000);return state;});commitQueue=job.catch(()=>{});return job;}
+async function commit(transform){const job=commitQueue.then(async()=>{const next=await transform(state);await saveState(next);state=next;updateUploadBanner();queueMailboxSync(250);return state;});commitQueue=job.catch(()=>{});return job;}
 function queueMailboxSync(delay=250){clearTimeout(mailboxSyncTimer);mailboxSyncTimer=setTimeout(()=>{void syncMailbox();},delay);}
 function queueMailboxResultSync(delay=0){clearTimeout(mailboxResultTimer);mailboxResultTimer=setTimeout(()=>{void syncMailboxResults();},delay);}
 function queueMailboxStateSync(delay=3000){clearTimeout(mailboxStateTimer);mailboxStateTimer=setTimeout(()=>{void syncMailboxState();},delay);}
 function resultRefreshInterval(){return state?.items?.some(record=>record.status==='queue'||record.cardRequestStatus==='requested')?ACTIVE_RESULT_REFRESH_INTERVAL:IDLE_RESULT_REFRESH_INTERVAL;}
 const utcStamp=()=>{const d=new Date(),p=n=>String(n).padStart(2,'0');return d.getUTCFullYear()+p(d.getUTCMonth()+1)+p(d.getUTCDate())+p(d.getUTCHours())+p(d.getUTCMinutes())+p(d.getUTCSeconds());};
 const randomPart=()=>crypto.getRandomValues(new Uint32Array(1))[0].toString(36).padStart(7,'0');
-const mailboxEvent=(type,payload,markers={})=>{const id=uid(),operationId=markers.operationId||(type.startsWith('calendar.')?id:null);return {schema:'avitolog.mailbox.v1',id,type,operationId,createdAt:new Date().toISOString(),payload:operationId?{...payload,operationId}:payload,markers:{origin:'site',...markers,operationId}};};
+const mailboxEvent=(type,payload,markers={})=>{const id=uid(),operationId=markers.operationId||(type.startsWith('calendar.')?id:null);return {schema:'avitolog.mailbox.v1',transportVersion:2,id,type,operationId,createdAt:new Date().toISOString(),payload:operationId?{...payload,operationId}:payload,markers:{origin:'site',...markers,operationId}};};
 const rememberCalendarOperation=(s,operationId)=>{if(!operationId)return true;s.calendarAppliedOperationIds??=[];if(s.calendarAppliedOperationIds.includes(operationId))return false;s.calendarAppliedOperationIds=[...s.calendarAppliedOperationIds,operationId].slice(-2000);return true;};
 const addOutbox=(s,type,payload,markers={})=>{const event=mailboxEvent(type,payload,markers);if(type.startsWith('calendar.'))rememberCalendarOperation(s,event.operationId);s.outbox.push(event);return s;};
 const listingMarkers=(record,action)=>({action,listingId:record.id,cards:cardSpec(record)});
@@ -104,21 +104,28 @@ function cardJob(task,payload,photos){
   source:{photoIds:photos.map(photo=>photo.id),attachments:photos.map(photo=>({photoId:photo.id,file:photo.file||null,type:photo.type})),factsSource:'listing.description-only'},
   resultRequirements:{styleCode:cards.style,exactCount:cards.count,coverAspectRatio:'1:1',oneAspectRatioForRemainingCards:true,echoRequestKey:payload.requestKey,returnPhotoIds:true}};
 }
-function taskAttachmentGroups(task){
+function taskSourceGroups(task){
  const payload=task.payload||{},itemPayload=payload.item||{};
  return {photos:Array.isArray(task.type==='cards.requested'?payload.sourcePhotos:itemPayload.photos)?(task.type==='cards.requested'?payload.sourcePhotos:itemPayload.photos):[],contextPhotos:['item.created','item.edited'].includes(task.type)&&Array.isArray(itemPayload.contextPhotos)?itemPayload.contextPhotos:[]};
 }
-function mailboxManifest(task,attachmentNames){
- const payload=structuredClone(task.payload||{}),{photos,contextPhotos}=taskAttachmentGroups({type:task.type,payload});
- const manifestPhotos=photos.map((photo,index)=>({id:photo.id,name:photo.name||('photo-'+(index+1)),type:photo.type||'image/jpeg',file:attachmentNames[index]||null}));
- const manifestContextPhotos=contextPhotos.map((photo,index)=>({id:photo.id,name:photo.name||('context-'+(index+1)),type:photo.type||'image/jpeg',file:attachmentNames[manifestPhotos.length+index]||null}));
+// Файлы хранятся один раз в репозитории объявления. Задание передаёт только
+// ссылки на них: это исключает повторную загрузку одинаковых фото.
+function taskAttachmentGroups(){return {photos:[],contextPhotos:[]};}
+function taskMediaReference(photo,index,prefix,attachmentName=null){
+ const path=photo.path||photo.mediaPath||attachmentName||null;
+ return {id:photo.id||null,name:photo.name||(prefix+'-'+(index+1)),type:photo.type||'image/jpeg',file:path,path,blobSha:photo.blobSha||null,size:photo.size||null};
+}
+function mailboxManifest(task,attachmentNames=[]){
+ const payload=structuredClone(task.payload||{}),{photos,contextPhotos}=taskSourceGroups({type:task.type,payload});
+ const manifestPhotos=photos.map((photo,index)=>taskMediaReference(photo,index,'photo',attachmentNames[index]||null));
+ const manifestContextPhotos=contextPhotos.map((photo,index)=>taskMediaReference(photo,index,'context',attachmentNames[manifestPhotos.length+index]||null));
  if(task.type==='cards.requested'){
   payload.sourcePhotos=manifestPhotos;if(payload.item)payload.item.photos=manifestPhotos;
   payload.cardJob=cardJob(task,payload,manifestPhotos);
  }
  else if(payload.item){payload.item.photos=manifestPhotos;payload.item.contextPhotos=manifestContextPhotos;}
  if(payload.item){delete payload.item.sourcePhotos;delete payload.item.imageHistory;}
- return JSON.stringify({schema:'avitolog.mailbox.v1',id:task.id,type:task.type,createdAt:task.createdAt,payload,markers:task.markers||{},attachments:attachmentNames},null,2);
+ return JSON.stringify({schema:'avitolog.mailbox.v1',transportVersion:2,id:task.id,type:task.type,createdAt:task.createdAt,payload,markers:task.markers||{},attachments:attachmentNames},null,2);
 }
 function putMailboxFile(path,content,message,options={}){return queueRepositoryWrite(mailboxConnection.repo,()=>putMailboxFileNow(path,content,message,options));}
 const repositoryWrites=new Map();
@@ -249,11 +256,19 @@ async function removeItemRepository(record){
  const response=await fetch('https://api.github.com/repos/'+record.itemRepository,{method:'DELETE',headers:{Accept:'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28',Authorization:'Bearer '+mailboxConnection.accessKey}});
  if(!response.ok&&response.status!==404)throw Error('Не удалось удалить хранилище объявления. Объявление оставлено без изменений.');
 }
+function markStoredPhoto(record,sourcePhoto,path){
+ const mark=photo=>{if(photo&&samePhoto(photo,sourcePhoto)){photo.mediaPath=path;photo.path=path;photo.uploadedPath=path;}};
+ for(const photo of record.photos||[])mark(photo);
+ for(const photo of record.sourcePhotos||[])mark(photo);
+ for(const photo of record.contextPhotos||[])mark(photo);
+ for(const group of record.imageHistory||[])for(const photo of group.photos||[])mark(photo);
+}
 async function itemSnapshotPhoto(record,photo,bucket,repo){
  if(!photo)return photo;
- const source=photo.src||photo.preview||'',id=String(photo.id||uid()),path=photo.mediaPath||photo.path||('images/'+bucket+'/'+id+'.'+fileExtension(photo));
- if(source.startsWith('data:'))await putRepositoryFile(repo,path,dataUriBase64(source),'Store listing media');
- return {...mediaReference(photo),mediaPath:path,path,src:null,preview:null};
+ const source=photo.src||photo.preview||'',id=String(photo.id||uid()),knownPath=photo.uploadedPath||photo.mediaPath||photo.path,path=knownPath||('images/'+bucket+'/'+id+'.'+fileExtension(photo));
+ if(source.startsWith('data:')&&!knownPath)await putRepositoryFile(repo,path,dataUriBase64(source),'Store listing media');
+ markStoredPhoto(record,photo,path);
+ return {...mediaReference(photo),mediaPath:path,path,uploadedPath:path,src:null,preview:null};
 }
 async function itemDocument(record,repo){
  const copy=structuredClone(record);
@@ -278,12 +293,14 @@ async function syncStatusFolder(repo,document){
  }
 }
 function mergeListingPhotos(local,remote){
- const merged=[],seen=new Set();
+ const merged=[],seen=new Map();
  for(const photo of [...(local||[]),...(remote||[])]){
   if(!photo)continue;
   const key=String(photo.id||photo.path||photo.mediaPath||photo.src||photo.preview||'');
-  if(!key||seen.has(key))continue;
-  seen.add(key);merged.push(photo);
+  if(!key)continue;
+  const existing=seen.get(key);
+  if(existing){if(!existing.path&&(photo.path||photo.mediaPath)){existing.path=photo.path||photo.mediaPath;existing.mediaPath=photo.mediaPath||photo.path;existing.uploadedPath=existing.path;}continue;}
+  seen.set(key,photo);merged.push(photo);
  }
  return merged;
 }
@@ -302,7 +319,7 @@ function preserveRemoteListingMedia(record,remote){
  record.imageHistory=mergeListingHistory(record.imageHistory,remote.imageHistory);
  return record;
 }
-async function syncListingProjection(record){
+async function syncListingProjection(record,{status=true,offers=true,contacts=true}={}){
  if(!record?.id||record.itemLoaded===false)return null;
  const repo=await ensureItemRepository(record);
  const current=await repositoryRequest(repo,'listing.json');
@@ -312,12 +329,11 @@ async function syncListingProjection(record){
   if(itemTime(remoteItem)>itemTime(record)||Number(remoteDocument.revision||0)>Number(record.revision||0))return {repo,document:remoteDocument,record:normalItem({...remoteItem,itemRepository:repo,itemLoaded:true}),skipped:true};
  }else if(current.status!==404)throw Error('Не удалось проверить актуальность объявления');
  preserveRemoteListingMedia(record,remoteItem);
- await hydrateListingMedia(record,true,{sources:true,history:true});
  const document=await itemDocument(record,repo);
  await repositoryJson(repo,'listing.json',document,'Update listing');
- await syncStatusFolder(repo,document);
- await repositoryJson(repo,'offers.json',{schemaVersion:1,listingId:record.id,revision:record.revision||0,updatedAt:document.updatedAt,offers:record.offers||[]},'Update offers');
- await repositoryJson(repo,'contacts.json',{schemaVersion:1,listingId:record.id,revision:record.revision||0,updatedAt:document.updatedAt,contacts:record.chats||[]},'Update contacts');
+ if(status)await syncStatusFolder(repo,document);
+ if(offers)await repositoryJson(repo,'offers.json',{schemaVersion:1,listingId:record.id,revision:record.revision||0,updatedAt:document.updatedAt,offers:record.offers||[]},'Update offers');
+ if(contacts)await repositoryJson(repo,'contacts.json',{schemaVersion:1,listingId:record.id,revision:record.revision||0,updatedAt:document.updatedAt,contacts:record.chats||[]},'Update contacts');
  return {repo,document,record};
 }
 function hubListingRow(record,document){
@@ -398,31 +414,39 @@ async function commandAlreadyAccepted(task,commandPath,repo){
  if(delivered.taskId!==task.id||delivered.itemRepository!==repo)throw Error('Подтверждение команды не совпадает с отправленным объявлением');
  return true;
 }
+function taskWithStoredMedia(task,document){
+ const copy=structuredClone(task),stored=document?.item||{},media=new Map();
+ for(const photo of [...(stored.photos||[]),...(stored.sourcePhotos||[]),...(stored.contextPhotos||[]),...(stored.imageHistory||[]).flatMap(group=>group.photos||[])])if(photo?.id)media.set(photo.id,photo);
+ const withPath=photo=>{const saved=media.get(photo?.id);return saved?{...photo,...mediaReference(saved)}:mediaReference(photo);};
+ if(copy.type==='cards.requested')copy.payload.sourcePhotos=(copy.payload?.sourcePhotos||[]).map(withPath);
+ if(copy.payload?.item){
+  copy.payload.item.photos=(copy.payload.item.photos||[]).map(withPath);
+  copy.payload.item.contextPhotos=(copy.payload.item.contextPhotos||[]).map(withPath);
+ }
+ return copy;
+}
+function projectionOptionsForTask(task){
+ const type=String(task?.type||'');
+ return {status:['item.created','item.status','item.published','item.archived','item.sold'].includes(type),offers:type.startsWith('offer.'),contacts:type.startsWith('chat.')||type.startsWith('contact.')};
+}
 async function sendMailboxEvent(task){
- const listingId=task.markers?.listingId||task.payload?.itemId||task.payload?.item?.id,record=item(listingId)||task.payload?.item||null,repo=record?await ensureItemRepository(record):null,prefix=String(task.createdAt||new Date().toISOString()).replace(/\D/g,'').slice(0,14)+'-'+String(task.id).replace(/[^a-zA-Z0-9-]/g,''),commandPath='inbox/'+prefix+'-command.json',{photos,contextPhotos}=taskAttachmentGroups(task),attachments=[...photos,...contextPhotos],attachmentNames=attachments.map(()=>null);
+ const listingId=task.markers?.listingId||task.payload?.itemId||task.payload?.item?.id,record=item(listingId)||task.payload?.item||null,repo=record?await ensureItemRepository(record):null,prefix=String(task.createdAt||new Date().toISOString()).replace(/\D/g,'').slice(0,14)+'-'+String(task.id).replace(/[^a-zA-Z0-9-]/g,''),commandPath='inbox/'+prefix+'-command.json';
  // Сеть могла оборваться после записи команды, но до локального подтверждения. В этом
  // случае команда уже есть в GitHub: не отправляем файлы заново и считаем её доставленной.
- if(await commandAlreadyAccepted(task,commandPath,repo)){queueMailboxStateSync();return;}
- for(let index=0;index<attachments.length;index++){
-  const photo=attachments[index],encoded=dataUriBase64(photo.src||photo.preview),extension=fileExtension(photo);if(!encoded)continue;
-  const name=prefix+'-'+(index<photos.length?(index+1)+'-photo':'context-'+(index-photos.length+1))+'.'+extension;
-  if(repo)await putRepositoryFile(repo,'tasks/in/'+name,encoded,'Add task attachment '+name);else await putMailboxFile('inbox/'+name,encoded,'Add attachment '+name);
-  attachmentNames[index]=name;
- }
+ if(await commandAlreadyAccepted(task,commandPath,repo))return;
+ let taskForProjection=task;
  if(record){
-  const saved=await syncListingProjection(record);
-  if(saved)await updateManifest([hubListingRow(saved.record||record,saved.document)],state.deletedMailboxItemIds||[]);
+  const saved=await syncListingProjection(record,projectionOptionsForTask(task));
+  if(saved){await updateManifest([hubListingRow(saved.record||record,saved.document)],state.deletedMailboxItemIds||[]);taskForProjection=taskWithStoredMedia(task,saved.document);}
  }
- if(repo)await writeTaskProjection(task,attachmentNames,repo);
- await mailboxJson(commandPath,{schema:'avitolog.hub-command.v1',taskId:task.id,listingId:listingId||null,type:task.type,createdAt:task.createdAt,itemRepository:repo,taskPath:repo?'tasks/in/'+task.id+'.json':null},'Add hub command');
+ if(repo)await writeTaskProjection(taskForProjection,[],repo);
+ await mailboxJson(commandPath,{schema:'avitolog.hub-command.v1',transportVersion:2,taskId:task.id,listingId:listingId||null,type:task.type,createdAt:task.createdAt,itemRepository:repo,taskPath:repo?'tasks/in/'+task.id+'.json':null},'Add hub command');
  if(!await commandAlreadyAccepted(task,commandPath,repo))throw Error('Не подтверждена запись команды. Отправка будет повторена.');
- // Other listings are synced separately; their failures must not undo this delivery.
- queueMailboxStateSync();
 }
 async function syncMailbox(){
  if(mailboxSyncing||!state||!mailboxConnection?.repo||!mailboxConnection?.accessKey)return;
  mailboxSyncing=true;
- try{for(const task of state.outbox.filter(x=>!x.deliveredAt)){try{await sendMailboxEvent(task);}catch(error){const message=String(error?.message||'Неизвестная ошибка отправки');mailboxStateFailed=true;await commit(s=>{const listingId=task.markers?.listingId||task.payload?.itemId||task.payload?.item?.id,record=s.items.find(value=>value.id===listingId);if(record){record.syncState='pending';record.syncError=message;record.syncFailedAt=new Date().toISOString();}return s;});toast('Объявление сохранено на устройстве. Отправка повторится: '+message);queueMailboxSync(10000);return;}await commit(s=>{const saved=s.outbox.find(x=>x.id===task.id);if(saved)saved.deliveredAt=new Date().toISOString();const listingId=task.markers?.listingId||task.payload?.itemId||task.payload?.item?.id,hasPending=s.outbox.some(value=>!value.deliveredAt&&value.id!==task.id&&(value.markers?.listingId===listingId||value.payload?.itemId===listingId||value.payload?.item?.id===listingId)),record=s.items.find(value=>value.id===listingId);if(record&&!hasPending){record.syncState='synced';record.syncedAt=new Date().toISOString();delete record.syncError;delete record.syncFailedAt;}return s;});}}
+ try{for(const task of state.outbox.filter(x=>!x.deliveredAt)){try{await sendMailboxEvent(task);}catch(error){const message=String(error?.message||'Неизвестная ошибка отправки');mailboxStateFailed=true;await commit(s=>{const listingId=task.markers?.listingId||task.payload?.itemId||task.payload?.item?.id,record=s.items.find(value=>value.id===listingId);if(record){record.syncState='pending';record.syncError=message;record.syncFailedAt=new Date().toISOString();}return s;});toast('Объявление сохранено на устройстве. Отправка повторится: '+message);continue;}await commit(s=>{const saved=s.outbox.find(x=>x.id===task.id);if(saved)saved.deliveredAt=new Date().toISOString();const listingId=task.markers?.listingId||task.payload?.itemId||task.payload?.item?.id,hasPending=s.outbox.some(value=>!value.deliveredAt&&value.id!==task.id&&(value.markers?.listingId===listingId||value.payload?.itemId===listingId||value.payload?.item?.id===listingId)),record=s.items.find(value=>value.id===listingId);if(record&&!hasPending){record.syncState='synced';record.syncedAt=new Date().toISOString();delete record.syncError;delete record.syncFailedAt;}return s;});}}
  finally{mailboxSyncing=false;if(state?.outbox.some(x=>!x.deliveredAt))queueMailboxSync(10000);if(route().parts[0]==='list')render();}
 }
 const base64Text=value=>{const binary=atob(String(value||'').replace(/\s/g,'')),bytes=Uint8Array.from(binary,c=>c.charCodeAt(0));return new TextDecoder().decode(bytes);};
