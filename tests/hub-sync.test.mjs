@@ -122,3 +122,19 @@ test('published and archived folders are exclusive and preserve canonical photos
   assert.equal(JSON.parse(Buffer.from(canonical[1].content,'base64')).item.status,status);
  }
 });
+
+test('a newer local edit keeps generated-card history stored in the listing repository',async()=>{
+ const h=harness(),item=model.normalItem({id:'history-test',status:'ready',title:'Product',updatedAt:'2026-10-16T12:00:00Z',photos:[]});
+ h.api.setup({...model.blankState(),items:[item]});
+ await h.api.syncListingProjection(item);
+ const [listingPath,entry]=[...h.files.entries()].find(([path])=>path.endsWith('/contents/listing.json'));
+ const remote=JSON.parse(Buffer.from(entry.content,'base64'));
+ remote.updatedAt='2026-10-15T12:00:00Z';remote.item.updatedAt=remote.updatedAt;
+ remote.item.imageHistory=[{id:'previous-series',kind:'generated',label:'Серия карточек',createdAt:'2026-10-15T10:00:00Z',photos:[{id:'old-card',src:'data:image/png;base64,YQ==',type:'image/png'}]}];
+ h.files.set(listingPath,{...entry,content:Buffer.from(JSON.stringify(remote)).toString('base64')});
+ item.updatedAt='2026-10-16T13:00:00Z';item.imageHistory=[];
+ await h.api.syncListingProjection(item);
+ const saved=JSON.parse(Buffer.from(h.files.get(listingPath).content,'base64')).item;
+ assert.equal(saved.imageHistory.length,1);
+ assert.equal(saved.imageHistory[0].id,'previous-series');
+});

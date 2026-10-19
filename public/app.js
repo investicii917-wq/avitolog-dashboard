@@ -271,16 +271,43 @@ async function syncStatusFolder(repo,document){
   if(!removed.ok&&removed.status!==404)throw Error('Перенос статуса будет повторён');
  }
 }
+function mergeListingPhotos(local,remote){
+ const merged=[],seen=new Set();
+ for(const photo of [...(local||[]),...(remote||[])]){
+  if(!photo)continue;
+  const key=String(photo.id||photo.path||photo.mediaPath||photo.src||photo.preview||'');
+  if(!key||seen.has(key))continue;
+  seen.add(key);merged.push(photo);
+ }
+ return merged;
+}
+function mergeListingHistory(local,remote){
+ const groups=[],seen=new Set();
+ for(const group of [...(local||[]),...(remote||[])]){
+  const photos=Array.isArray(group?.photos)?group.photos:[],key=group?.id||photoIds(photos);
+  if(!key||seen.has(key)||!photos.length)continue;
+  seen.add(key);groups.push({...group,photos:structuredClone(photos)});
+ }
+ return groups.sort((a,b)=>String(b.createdAt||'').localeCompare(String(a.createdAt||'')));
+}
+function preserveRemoteListingMedia(record,remote){
+ if(!remote)return record;
+ record.sourcePhotos=mergeListingPhotos(record.sourcePhotos,remote.sourcePhotos);
+ record.imageHistory=mergeListingHistory(record.imageHistory,remote.imageHistory);
+ return record;
+}
 async function syncListingProjection(record){
  if(!record?.id||record.itemLoaded===false)return null;
  const repo=await ensureItemRepository(record);
+ const current=await repositoryRequest(repo,'listing.json');
+ let remoteDocument=null,remoteItem=null;
+ if(current.ok){
+  remoteDocument=await decodeRepositoryJson(repo,'listing.json',await current.json());remoteItem=remoteDocument.item||{};
+  if(itemTime(remoteItem)>itemTime(record)||Number(remoteDocument.revision||0)>Number(record.revision||0))return {repo,document:remoteDocument,record:normalItem({...remoteItem,itemRepository:repo,itemLoaded:true}),skipped:true};
+ }else if(current.status!==404)throw Error('Не удалось проверить актуальность объявления');
+ preserveRemoteListingMedia(record,remoteItem);
  await hydrateListingMedia(record,true,{sources:true,history:true});
  const document=await itemDocument(record,repo);
- const current=await repositoryRequest(repo,'listing.json');
- if(current.ok){
-  const remoteDocument=await decodeRepositoryJson(repo,'listing.json',await current.json()),remoteItem=remoteDocument.item||{};
-  if(itemTime(remoteItem)>itemTime(record)||Number(remoteDocument.revision||0)>Number(document.revision||0))return {repo,document:remoteDocument,record:normalItem({...remoteItem,itemRepository:repo,itemLoaded:true}),skipped:true};
- }else if(current.status!==404)throw Error('Не удалось проверить актуальность объявления');
  await repositoryJson(repo,'listing.json',document,'Update listing');
  await syncStatusFolder(repo,document);
  await repositoryJson(repo,'offers.json',{schemaVersion:1,listingId:record.id,revision:record.revision||0,updatedAt:document.updatedAt,offers:record.offers||[]},'Update offers');
@@ -706,7 +733,7 @@ async function hydrateVisibleMedia(){
   if(parts[0]==='new'){
    if(draft)changed=await hydrateListingMedia(draft,false);
   }else if(parts[0]==='item'&&parts[1]){
-   const record=parts[2]==='edit'&&draft?draft:item(parts[1]);if(record)changed=await hydrateListingMedia(record,parts[2]!=='edit');
+   const record=parts[2]==='edit'&&draft?draft:item(parts[1]);if(record)changed=await hydrateListingMedia(record,parts[2]!=='edit',{sources:parts[2]==='edit',history:parts[2]==='edit'});
   }else if(parts[0]==='list'||!parts[0]||parts[0]==='analytics'){
    const records=(state.items||[]).filter(record=>record.photos?.[0]&&!mediaSrc(record.photos[0])).slice(0,50);
    await Promise.all(records.map(async record=>{const original=record.photos[0],temporary={id:record.id,photos:[original],sourcePhotos:[],imageHistory:[]};if(await hydrateListingMedia(temporary,false)){record.photos=[temporary.photos[0],...record.photos.slice(1)];changed=true}}));
